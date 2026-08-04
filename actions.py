@@ -42,5 +42,5 @@ def rest():
 
 def gather():
     logger.info(f"Gathering {character_name}")
-    return client.post(f"/my/{character_name}/action/gather", {})
+    return client.post(f"/my/{character_name}/action/gathering", {})
 
