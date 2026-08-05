@@ -8,27 +8,16 @@ Features:
 - JSON requests
 - Retry handling
 - Rate limit handling
-- Cooldown handling
+- Per-character cooldown handling
 - Generic endpoint access
-
-Usage:
-
-from artifacts_client import ArtifactsClient
-
-client = ArtifactsClient(
-    token="YOUR_TOKEN"
-)
-
-me = client.get("/my/characters")
-print(me)
-
 """
 
 from __future__ import annotations
 
+import re
 import time
 import requests
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 
 class ArtifactsAPIError(Exception):
@@ -36,15 +25,13 @@ class ArtifactsAPIError(Exception):
         self,
         status_code: int,
         message: str,
-        data: Any = None
+        data: Any = None,
     ):
         self.status_code = status_code
         self.message = message
         self.data = data
 
-        super().__init__(
-            f"[{status_code}] {message}"
-        )
+        super().__init__(f"[{status_code}] {message}")
 
 
 class ArtifactsClient:
@@ -58,11 +45,7 @@ class ArtifactsClient:
         timeout: int = 30,
         max_retries: int = 5,
     ):
-        self.base_url = (
-            base_url.rstrip("/")
-            if base_url
-            else self.BASE_URL
-        )
+        self.base_url = base_url.rstrip("/") if base_url else self.BASE_URL
 
         self.timeout = timeout
         self.max_retries = max_retries
@@ -78,6 +61,9 @@ class ArtifactsClient:
             }
         )
 
+        # character_name -> unix timestamp when next action is allowed
+        self.cooldowns: dict[str, float] = {}
+
     # ---------------------------------------------------------
     # Public HTTP methods
     # ---------------------------------------------------------
@@ -85,45 +71,45 @@ class ArtifactsClient:
     def get(
         self,
         path: str,
-        params: Dict[str, Any] | None = None
+        params: Dict[str, Any] | None = None,
     ):
         return self.request(
             "GET",
             path,
-            params=params
+            params=params,
         )
 
     def post(
         self,
         path: str,
-        json: Dict[str, Any] | None = None
+        json: Dict[str, Any] | None = None,
     ):
         return self.request(
             "POST",
             path,
-            json=json
+            json=json,
         )
 
     def patch(
         self,
         path: str,
-        json: Dict[str, Any] | None = None
+        json: Dict[str, Any] | None = None,
     ):
         return self.request(
             "PATCH",
             path,
-            json=json
+            json=json,
         )
 
     def delete(
         self,
         path: str,
-        json: Dict[str, Any] | None = None
+        json: Dict[str, Any] | None = None,
     ):
         return self.request(
             "DELETE",
             path,
-            json=json
+            json=json,
         )
 
     # ---------------------------------------------------------
@@ -134,8 +120,13 @@ class ArtifactsClient:
         self,
         method: str,
         path: str,
-        **kwargs
+        **kwargs,
     ):
+
+        character = self._extract_character(path)
+
+        if character:
+            self._wait_for_cooldown(character)
 
         url = self.base_url + path
         retries = 0
@@ -146,7 +137,7 @@ class ArtifactsClient:
                 method,
                 url,
                 timeout=self.timeout,
-                **kwargs
+                **kwargs,
             )
 
             try:
@@ -154,24 +145,23 @@ class ArtifactsClient:
             except Exception:
                 data = response.text
 
-
             # ---------------------------------------------
             # Success
             # ---------------------------------------------
 
             if response.ok or response.status_code == 499:
 
-                self._handle_cooldown(data["data"])
+                if character:
+                    self._update_cooldown(character, data.get("data"))
 
                 return data
-
 
             # ---------------------------------------------
             # Rate limit / temporary errors
             # ---------------------------------------------
 
             if response.status_code in (
-                429,    # rate limit
+                429,
                 500,
                 502,
                 503,
@@ -182,12 +172,12 @@ class ArtifactsClient:
                     raise ArtifactsAPIError(
                         response.status_code,
                         "Maximum retries exceeded",
-                        data
+                        data,
                     )
 
                 delay = self._retry_delay(
                     response,
-                    retries
+                    retries,
                 )
 
                 time.sleep(delay)
@@ -195,31 +185,46 @@ class ArtifactsClient:
                 retries += 1
                 continue
 
-
             # ---------------------------------------------
             # API errors
             # ---------------------------------------------
 
-            message = (
-                data.get("message")
-                if isinstance(data, dict)
-                else str(data)
-            )
+            message = data.get("error", {}).get("message") if isinstance(data, dict) else str(data)
 
             raise ArtifactsAPIError(
                 response.status_code,
                 message,
-                data
+                data,
             )
 
-
     # ---------------------------------------------------------
-    # Cooldown handling
+    # Character cooldown handling
     # ---------------------------------------------------------
 
-    def _handle_cooldown(
+    def _extract_character(self, path: str) -> str | None:
+        """
+        Extract character name from paths like:
+
+            /my/Bob/action/move
+            /my/Alice/action/fight
+        """
+        match = re.match(r"^/my/([^/]+)/", path)
+        if match:
+            return match.group(1)
+        return None
+
+    def _wait_for_cooldown(self, character: str):
+        until = self.cooldowns.get(character, 0)
+
+        remaining = until - time.time()
+
+        if remaining > 0:
+            time.sleep(remaining)
+
+    def _update_cooldown(
         self,
-        data: Any
+        character: str,
+        data: Any,
     ):
         if not isinstance(data, dict):
             return
@@ -229,14 +234,15 @@ class ArtifactsClient:
         if not cooldown:
             return
 
-        remaining = (
-            cooldown.get("remaining_seconds")
-            or cooldown.get("remaining")
+        remaining = cooldown.get("remaining_seconds") or cooldown.get("remaining")
+
+        if not remaining:
+            return
+
+        self.cooldowns[character] = max(
+            self.cooldowns.get(character, 0),
+            time.time() + float(remaining),
         )
-
-        if remaining:
-            time.sleep(float(remaining))
-
 
     # ---------------------------------------------------------
     # Retry calculation
@@ -245,18 +251,16 @@ class ArtifactsClient:
     def _retry_delay(
         self,
         response,
-        retry_number
+        retry_number,
     ):
 
-        retry_after = response.headers.get(
-            "Retry-After"
-        )
+        retry_after = response.headers.get("Retry-After")
 
         if retry_after:
             return float(retry_after)
 
         # exponential backoff
         return min(
-            2 ** retry_number,
-            30
+            2**retry_number,
+            30,
         )
