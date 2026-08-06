@@ -14,10 +14,18 @@ Features:
 
 from __future__ import annotations
 
-import re
+import logging
 import time
 import requests
+from datetime import datetime, timezone
 from typing import Any, Dict
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
 
 
 class ArtifactsAPIError(Exception):
@@ -32,6 +40,20 @@ class ArtifactsAPIError(Exception):
         self.data = data
 
         super().__init__(f"[{status_code}] {message}")
+
+
+class CharacterInCooldownError(Exception):
+    def __init__(
+        self,
+        character_name: str,
+        cooldown_seconds: int,
+    ):
+        self.character_name = character_name
+        self.cooldown_seconds = cooldown_seconds
+
+        super().__init__(
+            f"Character {character_name} is on cooldown for {cooldown_seconds} seconds"
+        )
 
 
 class ArtifactsClient:
@@ -60,9 +82,6 @@ class ArtifactsClient:
                 "User-Agent": "artifacts-python-client/1.0",
             }
         )
-
-        # character_name -> unix timestamp when next action is allowed
-        self.cooldowns: dict[str, float] = {}
 
     # ---------------------------------------------------------
     # Public HTTP methods
@@ -122,11 +141,7 @@ class ArtifactsClient:
         path: str,
         **kwargs,
     ):
-
-        character = self._extract_character(path)
-
-        if character:
-            self._wait_for_cooldown(character)
+        logger.debug(f"{method} {path} with params {kwargs.get('params', {})}")
 
         url = self.base_url + path
         retries = 0
@@ -150,10 +165,6 @@ class ArtifactsClient:
             # ---------------------------------------------
 
             if response.ok or response.status_code == 499:
-
-                if character:
-                    self._update_cooldown(character, data.get("data"))
-
                 return data
 
             # ---------------------------------------------
@@ -189,7 +200,19 @@ class ArtifactsClient:
             # API errors
             # ---------------------------------------------
 
-            message = data.get("error", {}).get("message") if isinstance(data, dict) else str(data)
+            message = (
+                data.get("error", {}).get("message")
+                if isinstance(data, dict)
+                else str(data)
+            )
+
+            if response.status_code == 490:
+                cooldown_seconds = self._extract_cooldown_seconds(data)
+                if cooldown_seconds is not None and cooldown_seconds > 0:
+                    raise CharacterInCooldownError(
+                        kwargs.get("character_name") or "unknown",
+                        cooldown_seconds,
+                    )
 
             raise ArtifactsAPIError(
                 response.status_code,
@@ -198,55 +221,40 @@ class ArtifactsClient:
             )
 
     # ---------------------------------------------------------
-    # Character cooldown handling
-    # ---------------------------------------------------------
-
-    def _extract_character(self, path: str) -> str | None:
-        """
-        Extract character name from paths like:
-
-            /my/Bob/action/move
-            /my/Alice/action/fight
-        """
-        match = re.match(r"^/my/([^/]+)/", path)
-        if match:
-            return match.group(1)
-        return None
-
-    def _wait_for_cooldown(self, character: str):
-        until = self.cooldowns.get(character, 0)
-
-        remaining = until - time.time()
-
-        if remaining > 0:
-            time.sleep(remaining)
-
-    def _update_cooldown(
-        self,
-        character: str,
-        data: Any,
-    ):
-        if not isinstance(data, dict):
-            return
-
-        cooldown = data.get("cooldown")
-
-        if not cooldown:
-            return
-
-        remaining = cooldown.get("remaining_seconds") or cooldown.get("remaining")
-
-        if not remaining:
-            return
-
-        self.cooldowns[character] = max(
-            self.cooldowns.get(character, 0),
-            time.time() + float(remaining),
-        )
-
-    # ---------------------------------------------------------
     # Retry calculation
     # ---------------------------------------------------------
+
+    def _extract_cooldown_seconds(self, payload: Any) -> int | None:
+        if not isinstance(payload, dict):
+            return None
+
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            return None
+
+        cooldown = data.get("cooldown")
+        if not isinstance(cooldown, dict):
+            return None
+
+        remaining_seconds = cooldown.get("remaining_seconds")
+        if isinstance(remaining_seconds, (int, float)):
+            return int(remaining_seconds)
+        if isinstance(remaining_seconds, str):
+            try:
+                return int(remaining_seconds)
+            except ValueError:
+                return None
+
+        expiration = cooldown.get("expiration")
+        if isinstance(expiration, str):
+            try:
+                expiration_dt = datetime.fromisoformat(expiration.replace("Z", "+00:00"))
+                now_dt = datetime.now(timezone.utc)
+                return max(0, int((expiration_dt - now_dt).total_seconds()))
+            except ValueError:
+                return None
+
+        return None
 
     def _retry_delay(
         self,

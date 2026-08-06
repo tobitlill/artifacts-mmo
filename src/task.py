@@ -1,8 +1,12 @@
-from abc import ABC
-from src.character import Character
-from src.location import Location
-import action
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
 import logging
+from datetime import datetime
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.character import Character
 
 logging.basicConfig(
     level=logging.INFO,
@@ -17,21 +21,16 @@ class Task(ABC):
         self.name: str = name
         self.done: bool = False
 
+    @abstractmethod
     def tick(self, character: Character):
-        logger.info(f"Working on task {self}")
-
-
-class CollectCopperTask(Task):
-    def __init__(self):
-        self.name = "CollectCopper"
-        super().__init__(self.name)
-
-    def tick(self, character: Character):
-        """
-        Go to (2, 0)
-        """
-        copper_location = Location(2, 0)
-
-        action.Move(copper_location)
-
         pass
+
+    def is_on_cooldown(self, character: Character) -> bool:
+        cooldown = character.get_cooldown()
+        if cooldown > 0:
+            logger.info(
+                f"{character.name} is on cooldown for {cooldown} seconds, skipping {self.name}"
+            )
+            return True
+        logger.info(f"{character.name} is not on cooldown, proceeding with {self.name}")
+        return False
