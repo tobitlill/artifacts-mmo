@@ -14,8 +14,8 @@ load_dotenv()
 client = ArtifactsClient(token=os.getenv("API_TOKEN"))
 
 
-# characters = [Character("tib0t"), Character("Hugo"), Character("Juergen")]
-characters = [Character("Juergen")]
+characters = [Character("tib0t"), Character("Hugo"), Character("Juergen")]
+# characters = [Character("Juergen")]
 gather_sunflowers_goal = GatherResourcesGoal(location=Location(2, 2), item_code="sunflower", quantity=100)
 
 for character in characters:

@@ -34,7 +34,7 @@ class GatherResourcesGoal(Goal):
             return None
 
         # do we have enough space in the inventory?
-        if inventory.get_free_space() < 100:
+        if inventory.get_free_space() < 5:
             if character.position == Location(4, 1):
                 logger.info(f"Depositing items at bank for {character.name}")
                 return DepositTask(all=True)
