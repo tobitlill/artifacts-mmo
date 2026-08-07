@@ -4,7 +4,7 @@ class Location:
         self.y: int = y
 
     def __repr__(self):
-        return (self.x, self.y)
+        return f"({self.x}, {self.y})"
 
     def __eq__(self, other):
         if not isinstance(other, Location):
@@ -12,6 +12,9 @@ class Location:
         return self.x == other.x and self.y == other.y
 
     def __ne__(self, other):
-            if not isinstance(other, Location):
-                return NotImplemented
-            return self.x != other.x or self.y != other.y
+        if not isinstance(other, Location):
+            return NotImplemented
+        return self.x != other.x or self.y != other.y
+
+    def __hash__(self):
+        return hash((self.x, self.y))

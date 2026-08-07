@@ -2,11 +2,10 @@ from src.inventory import Inventory
 from src.task import Task
 from src.character import Character
 from src.actions.deposit_action import DepositAction
-from src.location import Location
-from src.api_client import ArtifactsAPIError
+from src.api_client import ArtifactsAPIError, CharacterInCooldownError
+from src.event_log import EVENT_LOG
 import logging
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
@@ -18,32 +17,22 @@ class DepositTask(Task):
         self.item_code: str = item_code
         self.quantity: int = quantity
 
-    def tick(self, character: Character):
+    async def tick(self, character: Character):
 
         if self.is_on_cooldown(character):
             return
 
-        inventory: Inventory = character.get_inventory()
-        slots = inventory.slots
-        item_code = None
-        quantity = None
-        for slot in slots:
-            if slot.get("quantity", 0) > 0:
-                item_code = slot.get("code")
-                quantity = slot.get("quantity")
-                break
-            
-        if not self.all:
-            item_code = self.item_code
-            quantity = self.quantity
-
+        item_code, quantity = self._pick_item_to_deposit(character)
         if item_code is None:
             logger.info(f"No items to deposit for {character.name}")
             self.done = True
             return
-        
+
         try:
-            DepositAction(item_code=item_code, quantity=quantity).execute(character)
+            await DepositAction(item_code=item_code, quantity=quantity).execute(character)
+        except CharacterInCooldownError as e:
+            await self.apply_cooldown_error(character, e)
+            return
         except ArtifactsAPIError as e:
             if e.status_code == 478:
                 logger.info(f"{character.name} has no items to deposit")
@@ -53,5 +42,19 @@ class DepositTask(Task):
             if e.status_code == 598:
                 logger.info(f"{character.name} has no bank access")
                 self.done = True
+                EVENT_LOG.record(character.name, "deposit failed: no bank access")
                 return
-            raise e
+            raise
+
+        self.done = True
+        EVENT_LOG.record(character.name, f"deposited {quantity}x {item_code}")
+
+    def _pick_item_to_deposit(self, character: Character) -> tuple[str | None, int | None]:
+        if not self.all:
+            return self.item_code, self.quantity
+
+        inventory: Inventory = character.get_inventory()
+        for slot in inventory.slots:
+            if slot.get("quantity", 0) > 0:
+                return slot.get("code"), slot.get("quantity")
+        return None, None

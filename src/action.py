@@ -1,78 +1,60 @@
 from __future__ import annotations
 
-import os
 import logging
 from abc import ABC
-from datetime import datetime, timezone
-from dotenv import load_dotenv
-from src.api_client import ArtifactsClient, ArtifactsAPIError, CharacterInCooldownError
-from src.location import Location
 from typing import TYPE_CHECKING
+
+from src.api_client import ArtifactsClient
 
 if TYPE_CHECKING:
     from src.character import Character
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-load_dotenv()
-client = ArtifactsClient(token=os.getenv("API_TOKEN"))
 
 
 class Action(ABC):
-    def __init__(self, name: str = ""):
-        self.name: str = name
-        self.client = client
+    """Base class for every API-backed action.
 
-    def execute(self, character: Character, **kwargs):
+    A single ArtifactsClient is shared by all actions (one session, one
+    place to eventually coordinate rate limiting) - it must be configured
+    once via Action.configure_client() before any action executes.
+    """
+
+    client: ArtifactsClient | None = None
+
+    @classmethod
+    def configure_client(cls, client: ArtifactsClient) -> None:
+        cls.client = client
+
+    def __init__(self, name: str = ""):
+        if Action.client is None:
+            raise RuntimeError(
+                "ArtifactsClient not configured - call Action.configure_client(client) first"
+            )
+        self.name: str = name
+        self.client = Action.client
+
+    async def execute(self, character: Character, **kwargs):
         pass
 
-    def apply_cooldown_from_payload(self, character: Character, payload: object) -> None:
-        duration_seconds = self._extract_cooldown_seconds(payload)
-        if duration_seconds is None:
+    def apply_response_to_character(self, character: Character, payload: object) -> None:
+        """Update the character's local state (position, hp, inventory,
+        cooldown, ...) directly from an action's own response instead of
+        firing an extra GET to re-learn what the action itself just told us."""
+        if not isinstance(payload, dict):
             return
 
-        if hasattr(character, "set_cooldown"):
-            character.set_cooldown(duration_seconds)
-            logger.info(f"{character.name} marked on local cooldown for {duration_seconds} seconds")
-
-    def _extract_cooldown_seconds(self, payload: object) -> int | None:
-        if isinstance(payload, CharacterInCooldownError):
-            return payload.cooldown_seconds
-
-        if isinstance(payload, ArtifactsAPIError):
-            payload = payload.data
-
-        if not isinstance(payload, dict):
-            return None
-
         data = payload.get("data")
-        cooldown = None
-        if isinstance(data, dict):
-            cooldown = data.get("cooldown")
-        if cooldown is None:
-            cooldown = payload.get("cooldown")
-        if not isinstance(cooldown, dict):
-            return None
+        if not isinstance(data, dict):
+            return
 
-        expiration = cooldown.get("expiration")
-        if expiration:
-            try:
-                expiration_dt = datetime.fromisoformat(str(expiration).replace("Z", "+00:00"))
-                now_dt = datetime.now(timezone.utc)
-                return max(0, int((expiration_dt - now_dt).total_seconds()))
-            except ValueError:
-                pass
+        character_data = data.get("character")
+        if isinstance(character_data, dict):
+            character.apply_character_payload(character_data)
 
-        for key in ("remaining_seconds", "total_seconds"):
-            value = cooldown.get(key)
-            if isinstance(value, (int, float)):
-                return int(value)
-            if isinstance(value, str):
-                try:
-                    return int(value)
-                except ValueError:
-                    continue
-
-        return None
-
+        # The cooldown block on the action response is the freshest source
+        # of truth for this action; apply it last so it takes precedence
+        # over whatever cooldown_expiration was embedded in character_data.
+        cooldown_data = data.get("cooldown")
+        if isinstance(cooldown_data, dict):
+            character.set_cooldown_until(cooldown_data.get("expiration"))

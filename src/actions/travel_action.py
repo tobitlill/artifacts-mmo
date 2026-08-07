@@ -1,11 +1,9 @@
 import logging
 
 from src.action import Action
-from src.api_client import ArtifactsAPIError
 from src.location import Location
 from src.character import Character
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
@@ -15,18 +13,16 @@ class TravelAction(Action):
         self.name = "TravelAction"
         super().__init__(name=self.name)
 
-    def execute(self, character: Character):
+    async def execute(self, character: Character):
         logger.info(
             f"{character.name} travels to ({self.location.x}, {self.location.y})"
         )
-        try:
-            response = self.client.post(
-                f"/my/{character.name}/action/move",
-                {"x": self.location.x, "y": self.location.y},
-            )
-        except Exception as e:
-            raise
+        response = await self.client.post(
+            f"/my/{character.name}/action/move",
+            {"x": self.location.x, "y": self.location.y},
+        )
 
-        character.position = self.location
-        self.apply_cooldown_from_payload(character, response)
+        # Position/cooldown come from the response's own character data -
+        # never assume the move landed where we asked it to.
+        self.apply_response_to_character(character, response)
         return response

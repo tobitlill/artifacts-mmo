@@ -10,21 +10,20 @@ Features:
 - Rate limit handling
 - Per-character cooldown handling
 - Generic endpoint access
+- Fully async (aiohttp) so many characters can act concurrently instead of
+  queuing behind each other's network round trips
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
-import time
-import requests
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
+import aiohttp
+
 logger = logging.getLogger(__name__)
 
 
@@ -71,61 +70,84 @@ class ArtifactsClient:
 
         self.timeout = timeout
         self.max_retries = max_retries
+        self.token = token
 
-        self.session = requests.Session()
+        # Created lazily on first request so the aiohttp session is always
+        # bound to the event loop that's actually running requests.
+        self._session: aiohttp.ClientSession | None = None
+        self._session_lock = asyncio.Lock()
 
-        self.session.headers.update(
-            {
-                "Authorization": f"Bearer {token}",
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-                "User-Agent": "artifacts-python-client/1.0",
-            }
-        )
+    async def close(self) -> None:
+        if self._session is not None:
+            await self._session.close()
+            self._session = None
+
+    async def __aenter__(self) -> "ArtifactsClient":
+        return self
+
+    async def __aexit__(self, *exc_info) -> None:
+        await self.close()
+
+    async def _ensure_session(self) -> aiohttp.ClientSession:
+        if self._session is not None:
+            return self._session
+
+        async with self._session_lock:
+            if self._session is None:
+                self._session = aiohttp.ClientSession(
+                    headers={
+                        "Authorization": f"Bearer {self.token}",
+                        "Accept": "application/json",
+                        "Content-Type": "application/json",
+                        "User-Agent": "artifacts-python-client/1.0",
+                    },
+                    timeout=aiohttp.ClientTimeout(total=self.timeout),
+                )
+        return self._session
 
     # ---------------------------------------------------------
     # Public HTTP methods
     # ---------------------------------------------------------
 
-    def get(
+    async def get(
         self,
         path: str,
         params: Dict[str, Any] | None = None,
     ):
-        return self.request(
+        return await self.request(
             "GET",
             path,
             params=params,
         )
 
-    def post(
+    async def post(
         self,
         path: str,
         json: Dict[str, Any] | None = None,
     ):
-        return self.request(
+        return await self.request(
             "POST",
             path,
             json=json,
         )
 
-    def patch(
+    async def patch(
         self,
         path: str,
         json: Dict[str, Any] | None = None,
     ):
-        return self.request(
+        return await self.request(
             "PATCH",
             path,
             json=json,
         )
 
-    def delete(
+    async def delete(
         self,
         path: str,
         json: Dict[str, Any] | None = None,
     ):
-        return self.request(
+        return await self.request(
             "DELETE",
             path,
             json=json,
@@ -135,7 +157,7 @@ class ArtifactsClient:
     # Core request handler
     # ---------------------------------------------------------
 
-    def request(
+    async def request(
         self,
         method: str,
         path: str,
@@ -143,82 +165,80 @@ class ArtifactsClient:
     ):
         logger.debug(f"{method} {path} with params {kwargs.get('params', {})}")
 
+        session = await self._ensure_session()
         url = self.base_url + path
         retries = 0
 
         while True:
 
-            response = self.session.request(
-                method,
-                url,
-                timeout=self.timeout,
-                **kwargs,
-            )
+            async with session.request(method, url, **kwargs) as response:
+                try:
+                    data = await response.json(content_type=None)
+                except Exception:
+                    data = await response.text()
 
-            try:
-                data = response.json()
-            except Exception:
-                data = response.text
+                # ---------------------------------------------
+                # Success
+                # ---------------------------------------------
 
-            # ---------------------------------------------
-            # Success
-            # ---------------------------------------------
+                if response.ok:
+                    return data
 
-            if response.ok or response.status_code == 499:
-                return data
+                # ---------------------------------------------
+                # Rate limit / temporary errors
+                # ---------------------------------------------
 
-            # ---------------------------------------------
-            # Rate limit / temporary errors
-            # ---------------------------------------------
+                if response.status in (
+                    429,
+                    500,
+                    502,
+                    503,
+                    504,
+                ):
 
-            if response.status_code in (
-                429,
-                500,
-                502,
-                503,
-                504,
-            ):
+                    if retries >= self.max_retries:
+                        raise ArtifactsAPIError(
+                            response.status,
+                            "Maximum retries exceeded",
+                            data,
+                        )
 
-                if retries >= self.max_retries:
-                    raise ArtifactsAPIError(
-                        response.status_code,
-                        "Maximum retries exceeded",
-                        data,
+                    delay = self._retry_delay(
+                        response,
+                        retries,
                     )
 
-                delay = self._retry_delay(
-                    response,
-                    retries,
+                    await asyncio.sleep(delay)
+
+                    retries += 1
+                    continue
+
+                # ---------------------------------------------
+                # Character in cooldown (code 499)
+                # ---------------------------------------------
+
+                if response.status == 499:
+                    cooldown_seconds = self._extract_cooldown_seconds(data)
+                    raise CharacterInCooldownError(
+                        self._character_name_from_path(path),
+                        cooldown_seconds if cooldown_seconds is not None else 0,
+                    )
+
+                # ---------------------------------------------
+                # API errors
+                # ---------------------------------------------
+
+                message = (
+                    data.get("error", {}).get("message")
+                    if isinstance(data, dict)
+                    else str(data)
                 )
 
-                time.sleep(delay)
-
-                retries += 1
-                continue
-
-            # ---------------------------------------------
-            # API errors
-            # ---------------------------------------------
-
-            message = (
-                data.get("error", {}).get("message")
-                if isinstance(data, dict)
-                else str(data)
-            )
-
-            if response.status_code == 490:
-                cooldown_seconds = self._extract_cooldown_seconds(data)
-                if cooldown_seconds is not None and cooldown_seconds > 0:
-                    raise CharacterInCooldownError(
-                        kwargs.get("character_name") or "unknown",
-                        cooldown_seconds,
-                    )
-
-            raise ArtifactsAPIError(
-                response.status_code,
-                message,
-                data,
-            )
+                raise ArtifactsAPIError(
+                    response.status,
+                    message,
+                    data,
+                )
 
     # ---------------------------------------------------------
     # Retry calculation
@@ -229,32 +249,46 @@ class ArtifactsClient:
             return None
 
         data = payload.get("data")
-        if not isinstance(data, dict):
-            return None
+        cooldown = data.get("cooldown") if isinstance(data, dict) else None
 
-        cooldown = data.get("cooldown")
-        if not isinstance(cooldown, dict):
-            return None
-
-        remaining_seconds = cooldown.get("remaining_seconds")
-        if isinstance(remaining_seconds, (int, float)):
-            return int(remaining_seconds)
-        if isinstance(remaining_seconds, str):
-            try:
+        if isinstance(cooldown, dict):
+            remaining_seconds = cooldown.get("remaining_seconds")
+            if isinstance(remaining_seconds, (int, float)):
                 return int(remaining_seconds)
-            except ValueError:
-                return None
+            if isinstance(remaining_seconds, str):
+                try:
+                    return int(remaining_seconds)
+                except ValueError:
+                    pass
 
-        expiration = cooldown.get("expiration")
-        if isinstance(expiration, str):
-            try:
-                expiration_dt = datetime.fromisoformat(expiration.replace("Z", "+00:00"))
-                now_dt = datetime.now(timezone.utc)
-                return max(0, int((expiration_dt - now_dt).total_seconds()))
-            except ValueError:
-                return None
+            expiration = cooldown.get("expiration")
+            if isinstance(expiration, str):
+                try:
+                    expiration_dt = datetime.fromisoformat(expiration.replace("Z", "+00:00"))
+                    now_dt = datetime.now(timezone.utc)
+                    return max(0, int((expiration_dt - now_dt).total_seconds()))
+                except ValueError:
+                    pass
+
+        # The 499 (cooldown) error body typically only carries {"error": {"message": ...}}
+        # without a structured cooldown object; best-effort parse the remaining time out
+        # of the message text so callers don't have to fall back to a refresh() every time.
+        error = payload.get("error")
+        message = error.get("message") if isinstance(error, dict) else None
+        if isinstance(message, str):
+            match = re.search(r"([\d.]+)\s*second", message, re.IGNORECASE)
+            if match:
+                try:
+                    return int(float(match.group(1)))
+                except ValueError:
+                    return None
 
         return None
+
+    @staticmethod
+    def _character_name_from_path(path: str) -> str:
+        match = re.match(r"^/my/([^/]+)/action/", path)
+        return match.group(1) if match else "unknown"
 
     def _retry_delay(
         self,

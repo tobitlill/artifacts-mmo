@@ -5,25 +5,22 @@ from abc import ABC, abstractmethod
 import logging
 from typing import TYPE_CHECKING
 
+from src.event_log import EVENT_LOG
+
 if TYPE_CHECKING:
     from src.character import Character
     from src.task import Task
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
 logger = logging.getLogger(__name__)
 
 
 class Goal(ABC):
-    def __init__(self, name: str, tasks: list[Task] = []):
+    def __init__(self, name: str, tasks: list[Task] | None = None):
         self.name: str = name
-        self.tasks: list[Task] = tasks
+        self.tasks: list[Task] = tasks if tasks is not None else []
         self.done: bool = False
 
-    def tick(self, character: Character):
+    async def tick(self, character: Character):
         if self.done:
             logger.info(f"Goal {self.name} done for {character.name}")
             return
@@ -32,12 +29,14 @@ class Goal(ABC):
 
         if not self.tasks:
             task = self.next_task(character)
-            logger.info(f"Next task for goal {self.name} is {task.name}")
 
             if task is None:
+                logger.info(f"Goal {self.name} has no more tasks for {character.name}, marking done")
                 self.done = True
+                EVENT_LOG.record(character.name, f"goal completed: {self.name}")
                 return
 
+            logger.info(f"Next task for goal {self.name} is {task.name}")
             self.tasks.append(task)
 
         current_task = self.tasks[0]
@@ -48,7 +47,7 @@ class Goal(ABC):
             return
 
         logger.debug(f"Ticking current task {current_task.name} for goal {self.name}")
-        current_task.tick(character)
+        await current_task.tick(character)
 
         if current_task.done:
             logger.info(f"Task {current_task.name} done for goal {self.name}")
@@ -57,3 +56,9 @@ class Goal(ABC):
     @abstractmethod
     def next_task(self, character: Character) -> Task | None:
         pass
+
+    def progress_text(self, character: Character) -> str | None:
+        """Optional short human-readable progress indicator (e.g. "37/100
+        sunflower") for display purposes. None means "not quantifiable" -
+        e.g. an endless goal has no natural completion fraction."""
+        return None

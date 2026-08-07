@@ -7,7 +7,6 @@ if TYPE_CHECKING:
     from src.character import Character
 
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
@@ -16,9 +15,9 @@ class GetCharacter(Action):
         self.name = "GetCharacterAction"
         super().__init__()
 
-    def execute(self, character: Character):
+    async def execute(self, character: Character):
         logger.debug(f"Executing GetCharacterAction for {character.name}")
-        characters = self.client.get("/my/characters")
+        characters = await self.client.get("/my/characters")
         for c in characters["data"]:
             if c["name"] == character.name:
                 return c
