@@ -14,7 +14,7 @@ from src.goals.endless_fighting_goal import EndlessFightGoal
 from src.goals.gather_ressources_goal import GatherResourcesGoal
 from src.location import Location
 from src.logging_config import configure_logging
-from src.constants import RESOURCE_LOCATIONS
+from src.constants import RESOURCE_LOCATIONS, MONSTER_LOCATIONS
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -74,6 +74,14 @@ CHARACTER_GOALS: dict[str, Callable[[], list[Goal]]] = {
             quantity=1000,
             location=RESOURCE_LOCATIONS["gudgeon"],
         ),
+        EndlessFightGoal(
+            location=MONSTER_LOCATIONS["chicken"],
+            monster="chicken",
+            potion_item_code="small_health_potion",
+            potion_slot="utility1",
+            potion_min_level=5,
+            max_potions=100,
+        ),
     ],
     "Udo": lambda: [
         GatherResourcesGoal(
@@ -86,6 +94,14 @@ CHARACTER_GOALS: dict[str, Callable[[], list[Goal]]] = {
             item_code="copper_ore",
             quantity=2000,
         ),
+        EndlessFightGoal(
+            location=MONSTER_LOCATIONS["chicken"],
+            monster="chicken",
+            potion_item_code="small_health_potion",
+            potion_slot="utility1",
+            potion_min_level=5,
+            max_potions=100,
+        ),
     ],
     "Rolf": lambda: [
         GatherResourcesGoal(
@@ -95,6 +111,14 @@ CHARACTER_GOALS: dict[str, Callable[[], list[Goal]]] = {
         ),
         GatherResourcesGoal(
             location=RESOURCE_LOCATIONS["ash_wood"], item_code="ash_wood", quantity=2000
+        ),
+        EndlessFightGoal(
+            location=MONSTER_LOCATIONS["chicken"],
+            monster="chicken",
+            potion_item_code="small_health_potion",
+            potion_slot="utility1",
+            potion_min_level=5,
+            max_potions=100,
         ),
     ],
     # Any character can instead get a fighting goal (or anything else) -
