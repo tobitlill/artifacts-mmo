@@ -88,6 +88,24 @@ def test_recovers_from_497_instead_of_looping_forever():
     assert char.inventory.get_free_space() == 0
 
 
+def test_recovers_from_478_instead_of_looping_forever():
+    """Regression: characters share one bank and tick concurrently, so the
+    availability check can be stale by the time the withdraw actually
+    posts (another character got there first). Must give up on this
+    material for now, not retry the same now-gone quantity forever."""
+    client = FakeClient(["A"])
+    Action.configure_client(client)
+    client.bank["sunflower"] = 50
+    char = _char(client)
+    client.fail_next_action_with_478("A")
+
+    task = WithdrawMaterialTask("sunflower", 30)
+    run_async(task.tick(char))  # must not raise
+
+    assert task.done is True
+    assert char.inventory.get_item_count("sunflower") == 0
+
+
 def test_recovers_from_598_instead_of_crashing():
     """Defense in depth: the caller (GatherResourcesGoal) is responsible
     for making sure the character is at the bank before returning this

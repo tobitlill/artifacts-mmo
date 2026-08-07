@@ -179,6 +179,28 @@ def test_restock_task_recovers_from_497_instead_of_looping_forever():
     assert char.inventory.get_free_space() == 0
 
 
+def test_restock_task_recovers_from_478_instead_of_looping_forever():
+    """Regression test for the Hugo incident: characters share one bank
+    and tick concurrently, so the availability check can be stale by the
+    time the withdraw actually posts (another character got there first).
+    The task must give up on this visit, not retry the same now-gone
+    quantity forever."""
+    client = FakeClient(["A"])
+    Action.configure_client(client)
+    client.state["A"]["level"] = 8
+    client.bank["small_health_potion"] = 50
+    char = Character("A")
+    run_async(char.refresh())
+
+    client.fail_next_action_with_478("A")
+
+    task = RestockUtilityTask("small_health_potion", "utility1", max_quantity=100, min_level=5)
+    run_async(task.tick(char))  # must not raise
+
+    assert task.done is True
+    assert char.data.get("utility1_slot") != "small_health_potion"
+
+
 def test_restock_task_withdraws_less_than_max_if_bank_has_less():
     client = FakeClient(["A"])
     Action.configure_client(client)

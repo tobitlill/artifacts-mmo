@@ -197,3 +197,43 @@ def test_deposit_task_all_with_empty_inventory_marks_done_without_calling_api():
 
     assert task.done is True
     assert not any(call[0] == "POST" for call in client.calls)
+
+
+def test_deposit_task_all_skips_excluded_codes():
+    client = FakeClient(["A"])
+    Action.configure_client(client)
+    char = Character("A")
+    run_async(char.refresh())
+    inventory_data = {
+        "inventory": [
+            {"code": "copper_ore", "quantity": 3},
+            {"code": "copper_bar", "quantity": 2},
+        ],
+        "inventory_max_items": 20,
+    }
+    char.inventory.update_from_character_data(inventory_data)
+    client.state["A"]["inventory"] = inventory_data["inventory"]
+    client.state["A"]["inventory_max_items"] = 20
+
+    task = DepositTask(all=True, exclude={"copper_ore"})
+    assert _tick_until_done(char, task, client)
+
+    assert char.inventory.get_item_count("copper_bar") == 0
+    assert char.inventory.get_item_count("copper_ore") == 3  # left alone
+
+
+def test_deposit_task_all_with_only_excluded_items_marks_done_without_calling_api():
+    client = FakeClient(["A"])
+    Action.configure_client(client)
+    char = Character("A")
+    run_async(char.refresh())
+    char.inventory.update_from_character_data(
+        {"inventory": [{"code": "copper_ore", "quantity": 3}], "inventory_max_items": 20}
+    )
+
+    task = DepositTask(all=True, exclude={"copper_ore"})
+    run_async(task.tick(char))
+
+    assert task.done is True
+    assert not any(call[0] == "POST" for call in client.calls)
+    assert char.inventory.get_item_count("copper_ore") == 3

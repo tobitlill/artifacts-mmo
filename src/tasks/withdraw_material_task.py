@@ -61,6 +61,19 @@ class WithdrawMaterialTask(Task):
                 await character.refresh()
                 self.done = True
                 return
+            if e.status_code == 478:
+                # Multiple characters share one bank and tick concurrently -
+                # the availability check above can be stale by the time this
+                # withdrawal actually posts (someone else got there first).
+                # Give up on this material for now rather than retrying the
+                # same now-unavailable quantity forever.
+                logger.warning(
+                    f"{character.name} couldn't withdraw {self.item_code} after all - "
+                    f"bank stock changed since the check"
+                )
+                EVENT_LOG.record(character.name, f"bank ran out of {self.item_code} before withdrawal")
+                self.done = True
+                return
             raise
 
         self.done = True

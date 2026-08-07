@@ -11,11 +11,18 @@ logger = logging.getLogger(__name__)
 
 class DepositTask(Task):
 
-    def __init__(self, all: bool = False, item_code: str = None, quantity: int = None):
+    def __init__(
+        self,
+        all: bool = False,
+        item_code: str = None,
+        quantity: int = None,
+        exclude: set[str] | None = None,
+    ):
         super().__init__("DepositTask")
         self.all: bool = all
         self.item_code: str = item_code
         self.quantity: int = quantity
+        self.exclude: set[str] = exclude or set()
 
     async def tick(self, character: Character):
 
@@ -55,6 +62,6 @@ class DepositTask(Task):
 
         inventory: Inventory = character.get_inventory()
         for slot in inventory.slots:
-            if slot.get("quantity", 0) > 0:
+            if slot.get("quantity", 0) > 0 and slot.get("code") not in self.exclude:
                 return slot.get("code"), slot.get("quantity")
         return None, None

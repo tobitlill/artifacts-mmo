@@ -40,18 +40,26 @@ class GatherResourcesGoal(Goal):
       never confused with "ready to bank" mid-cycle (see the CLEAR/ACQUIRE/
       CRAFT/BANK stages below):
 
-        1. CLEAR - deposit everything, so "how much can I carry" starts
-           from a known, empty inventory.
-        2. ACQUIRE - take as much of each material as fits (leaving a
-           little headroom for the crafted result) or as much as still
-           needed to reach `quantity`, whichever is smaller - from the
-           bank first (see WithdrawMaterialTask - a stockpile someone
-           already gathered gets used before anyone goes out gathering
-           more), then gathered at material_locations for any shortfall.
+        1. CLEAR - deposit anything that isn't a recipe material (the
+           crafted result from last cycle, or unrelated junk), so "how
+           much fits" is computed against a clean baseline. Leftover
+           material (e.g. a few units left over because gathering yields
+           don't divide evenly into batches) is deliberately *not*
+           deposited here - it stays in inventory and counts directly
+           toward next cycle's need, rather than getting deposited and
+           then immediately withdrawn again for no reason.
+        2. ACQUIRE - top up each material to as much as fits (leaving a
+           little headroom for the crafted result, and accounting for
+           whatever's already carried over) or as much as still needed to
+           reach `quantity`, whichever is smaller - from the bank first
+           (see WithdrawMaterialTask - a stockpile someone already
+           gathered gets used before anyone goes out gathering more),
+           then gathered at material_locations for any shortfall.
         3. CRAFT - craft everything acquired in one go, at the recipe's
            workshop (craft_location, or looked up from WORKSHOP_LOCATIONS
            by the recipe's skill).
-        4. BANK - deposit the crafted result, then start over at CLEAR.
+        4. BANK - deposit the crafted result (materials excluded again, in
+           case nothing got crafted), then start over at CLEAR.
 
         goal = GatherResourcesGoal(
             item_code="small_health_potion",
@@ -211,27 +219,38 @@ class GatherResourcesGoal(Goal):
         return self._do_bank(character)
 
     def _do_clear(self, character: Character, inventory: Inventory):
-        """Deposit everything before starting a fresh acquire/craft cycle,
-        so "how much fits" is computed against a known, empty inventory -
-        this is what prevents materials from ever being mistaken for
-        "ready to bank" mid-cycle (the bug that caused deposit/withdraw to
-        loop forever without ever reaching craft)."""
-        if inventory.get_free_space() < inventory.max_items:
+        """Deposit anything that isn't a recipe material before starting a
+        fresh acquire/craft cycle - materials themselves are deliberately
+        left alone (see _do_bank) so leftover scraps from gather-yield
+        granularity carry straight into next cycle's need instead of
+        bouncing through the bank for no reason. If there's nothing but
+        leftover material to deal with, skip the bank trip entirely."""
+        if self._has_depositable_items(inventory):
             if character.position != BANK_LOCATION:
                 logger.info(f"Heading to bank to start a clean cycle for {character.name}")
                 return TravelTask(BANK_LOCATION)
             logger.info(f"Depositing at bank for {character.name}")
             self._bank_stock = None
-            return DepositTask(all=True)
+            return DepositTask(all=True, exclude=set(self.material_locations))
 
         self._craft_stage = self._STAGE_ACQUIRE
         self._acquire_targets = None
         self._tried_bank_withdrawal.clear()
         return self._do_acquire(character, inventory)
 
+    def _has_depositable_items(self, inventory: Inventory) -> bool:
+        material_codes = set(self.material_locations)
+        return any(
+            slot.get("quantity", 0) > 0 and slot.get("code") not in material_codes
+            for slot in inventory.slots
+        )
+
     def _do_acquire(self, character: Character, inventory: Inventory):
         """Returns the next task needed to top up materials, or None once
-        every material has reached this cycle's target."""
+        every material has reached this cycle's target (or the inventory
+        has filled up before getting there - the server's actual gather
+        yield doesn't always match our own free-space math exactly, so
+        trust its rejection over retrying the same doomed gather forever)."""
         if self._acquire_targets is None:
             self._acquire_targets = self._compute_acquire_targets(character, inventory)
 
@@ -240,6 +259,13 @@ class GatherResourcesGoal(Goal):
             target = self._acquire_targets.get(material_code, 0)
             if have >= target:
                 continue
+
+            if inventory.get_free_space() <= 0:
+                logger.warning(
+                    f"{character.name}'s inventory filled up before reaching this cycle's "
+                    f"{material_code} target - proceeding with what's on hand"
+                )
+                break
 
             if material_code not in self._tried_bank_withdrawal:
                 if character.position != BANK_LOCATION:
@@ -284,16 +310,21 @@ class GatherResourcesGoal(Goal):
         logger.info(f"Depositing at bank for {character.name}")
         self._bank_stock = None
         self._craft_stage = self._STAGE_CLEAR
-        return DepositTask(all=True)
+        return DepositTask(all=True, exclude=set(self.material_locations))
 
     def _compute_acquire_targets(self, character: Character, inventory: Inventory) -> dict[str, int]:
         """How many of each material to acquire this cycle: as many
-        batches as fit in the (currently empty) inventory - leaving some
-        headroom for the crafted result - capped at however many batches
-        are actually still needed to reach `quantity`, and capped again by
-        cycle_batches if the caller set an explicit limit."""
+        batches as fit - leaving some headroom for the crafted result, and
+        counting whatever material is already carried over from last
+        cycle as space already "spent" rather than space we still need to
+        find - capped at however many batches are actually still needed
+        to reach `quantity`, and capped again by cycle_batches if the
+        caller set an explicit limit."""
         material_qty_per_batch_total = sum(self.recipe.materials.values())
-        usable_space = max(inventory.max_items - self.RESERVED_SPACE_FOR_OUTPUT, 0)
+        already_held = sum(inventory.get_item_count(m) for m in self.recipe.materials)
+        usable_space = max(
+            inventory.get_free_space() + already_held - self.RESERVED_SPACE_FOR_OUTPUT, 0
+        )
         max_batches_by_space = (
             usable_space // material_qty_per_batch_total if material_qty_per_batch_total else 0
         )

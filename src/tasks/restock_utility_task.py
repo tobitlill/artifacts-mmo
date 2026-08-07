@@ -81,6 +81,20 @@ class RestockUtilityTask(Task):
                 character.inventory.mark_full()
                 self.done = True
                 return
+            if e.status_code == 478:
+                # Multiple characters share one bank and tick concurrently -
+                # the availability check above can be stale by the time the
+                # withdraw (or equip, if withdrawal already went through but
+                # the game's own inventory bookkeeping lags) actually posts.
+                # Skip restocking this visit rather than retrying the same
+                # now-unavailable quantity forever.
+                logger.warning(
+                    f"{character.name} couldn't restock {self.item_code} after all - "
+                    f"bank stock changed since the check"
+                )
+                EVENT_LOG.record(character.name, f"bank ran out of {self.item_code} before restock")
+                self.done = True
+                return
             raise
 
         self.done = True

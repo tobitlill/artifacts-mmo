@@ -360,12 +360,20 @@ def test_acquire_targets_capped_by_remaining_need_not_just_capacity():
     assert targets == {"sunflower": 9}  # 3 sunflower/batch x 3 batches
 
 
-def _advance_to_craft_stage(goal, char, materials: dict):
+def _advance_to_craft_stage(goal, char, materials: dict, client=None):
     """Test helper: skip past CLEAR/ACQUIRE to exercise the CRAFT stage
-    directly, with the given materials already sitting in inventory."""
-    char.inventory.update_from_character_data(
-        {"inventory": [{"code": code, "quantity": qty} for code, qty in materials.items()], "inventory_max_items": 50}
-    )
+    directly, with the given materials already sitting in inventory. Pass
+    `client` too when the test will actually tick a CraftTask/DepositTask
+    to completion - the fake server checks its own state's inventory, not
+    the character object, so both need to agree."""
+    inventory = {
+        "inventory": [{"code": code, "quantity": qty} for code, qty in materials.items()],
+        "inventory_max_items": 50,
+    }
+    char.inventory.update_from_character_data(inventory)
+    if client is not None:
+        client.state[char.name]["inventory"] = inventory["inventory"]
+        client.state[char.name]["inventory_max_items"] = 50
     goal._craft_stage = goal._STAGE_CRAFT
 
 
@@ -460,10 +468,212 @@ def test_full_craft_cycle_gather_craft_deposit_recheck():
     assert total >= 25
     assert "ResolveRecipeTask" in seen_types
     assert "CheckBankStockTask" in seen_types
-    assert "TravelTask" in seen_types
-    assert "GatherTask" in seen_types
-    assert "CraftTask" in seen_types
-    assert "DepositTask" in seen_types
+
+
+# ---------------------------------------------------------------------------
+# Leftover-material carryover (regression: Udo withdrawing ore right before
+# going mining, because leftover scraps got deposited and then immediately
+# re-withdrawn for no reason)
+# ---------------------------------------------------------------------------
+
+
+def test_clear_stage_skips_bank_trip_when_only_leftover_material_remains():
+    client = FakeClient(["A"])
+    Action.configure_client(client)
+    char = _char(client)
+    char.inventory.update_from_character_data(
+        {"inventory": [{"code": "sunflower", "quantity": 2}], "inventory_max_items": 50}
+    )
+    goal = _make_craft_goal(cycle_batches=5)
+
+    _resolve(goal, char)
+    run_async(goal.next_task(char).tick(char))  # initial potion bank-stock check (0)
+
+    # Only leftover sunflower (a recipe material) sits in inventory - CLEAR
+    # must not deposit it, it should move straight to ACQUIRE.
+    task = goal.next_task(char)
+    assert not isinstance(task, DepositTask)
+    assert goal._craft_stage == goal._STAGE_ACQUIRE
+
+    # and the 2 already held count directly toward this cycle's target
+    assert goal._acquire_targets == {"sunflower": 15}
+    assert char.inventory.get_item_count("sunflower") == 2  # untouched, not deposited
+
+
+def test_leftover_material_reduces_amount_withdrawn_from_bank():
+    client = FakeClient(["A"])
+    Action.configure_client(client)
+    client.bank["sunflower"] = 1000
+    char = _char(client)
+    inventory_data = {"inventory": [{"code": "sunflower", "quantity": 2}], "inventory_max_items": 50}
+    char.inventory.update_from_character_data(inventory_data)
+    client.state["A"]["inventory"] = inventory_data["inventory"]
+    client.state["A"]["inventory_max_items"] = 50
+    goal = _make_craft_goal(cycle_batches=5)  # target: 15 sunflower this cycle
+
+    _resolve(goal, char)
+    run_async(goal.next_task(char).tick(char))  # initial potion bank-stock check (0)
+
+    task = goal.next_task(char)  # straight to ACQUIRE, no deposit of the leftover
+    assert isinstance(task, TravelTask)
+    assert task.target_location == BANK_LOCATION
+    run_async(task.tick(char))
+
+    task = goal.next_task(char)
+    assert isinstance(task, WithdrawMaterialTask)
+    assert task.item_code == "sunflower"
+    assert task.requested_quantity == 13  # 15 target - 2 already held, not the full 15
+
+    run_async(task.tick(char))
+    while not task.done:
+        run_async(task.tick(char))
+        if char.cooldown > 0:
+            client.expire_cooldown("A")
+            char.set_cooldown_until(None)
+
+    assert char.inventory.get_item_count("sunflower") == 15
+    assert client.bank["sunflower"] == 987
+
+
+def test_bank_stage_leaves_leftover_material_out_of_the_deposit():
+    """After crafting, BANK must deposit the crafted result but leave any
+    leftover material (e.g. gather yields that didn't divide evenly into a
+    batch) in inventory rather than sweeping it into the bank too."""
+    client = FakeClient(["A"])
+    Action.configure_client(client)
+    char = _char(client)
+    char.position = ALCHEMY_LOCATION
+    goal = _make_craft_goal(cycle_batches=5)
+
+    _resolve(goal, char)
+    run_async(goal.next_task(char).tick(char))  # initial potion bank-stock check (0)
+    _advance_to_craft_stage(goal, char, {"sunflower": 17}, client=client)  # 2 left over after a 15-sunflower batch
+
+    task = goal.next_task(char)  # pre-craft recheck
+    assert isinstance(task, CheckBankStockTask)
+    run_async(task.tick(char))
+
+    task = goal.next_task(char)  # CraftTask consumes 15 of the 17 sunflower
+    assert isinstance(task, CraftTask)
+    run_async(task.tick(char))
+    while not task.done:
+        run_async(task.tick(char))
+        if char.cooldown > 0:
+            client.expire_cooldown("A")
+            char.set_cooldown_until(None)
+
+    assert char.inventory.get_item_count("sunflower") == 2
+    assert goal._craft_stage == goal._STAGE_BANK
+
+    char.position = BANK_LOCATION
+    task = goal.next_task(char)
+    assert isinstance(task, DepositTask)
+    run_async(task.tick(char))
+    while not task.done:
+        run_async(task.tick(char))
+        if char.cooldown > 0:
+            client.expire_cooldown("A")
+            char.set_cooldown_until(None)
+
+    assert char.inventory.get_item_count("small_health_potion") == 0  # crafted result deposited
+    assert char.inventory.get_item_count("sunflower") == 2  # leftover material kept
+
+
+def test_leftover_material_carries_over_without_a_pointless_bank_round_trip():
+    """End-to-end regression for the Udo scenario: leftover ore from
+    gather-yield overshoot must never be deposited and then immediately
+    re-withdrawn - once it's in inventory it should just count toward the
+    next cycle's acquire target."""
+    client = FakeClient(["A"])
+    Action.configure_client(client)
+    char = _char(client)
+    char.position = ALCHEMY_LOCATION
+    client.state["A"]["x"], client.state["A"]["y"] = ALCHEMY_LOCATION.x, ALCHEMY_LOCATION.y
+    goal = _make_craft_goal(cycle_batches=5)
+
+    _resolve(goal, char)
+    run_async(goal.next_task(char).tick(char))
+    _advance_to_craft_stage(goal, char, {"sunflower": 17}, client=client)
+
+    task = goal.next_task(char)
+    run_async(task.tick(char))  # recheck
+    task = goal.next_task(char)  # craft
+    run_async(task.tick(char))
+    while not task.done:
+        run_async(task.tick(char))
+        if char.cooldown > 0:
+            client.expire_cooldown("A")
+            char.set_cooldown_until(None)
+
+    char.position = BANK_LOCATION
+    client.state["A"]["x"], client.state["A"]["y"] = BANK_LOCATION.x, BANK_LOCATION.y
+    task = goal.next_task(char)  # deposit crafted result (sunflower excluded)
+    run_async(task.tick(char))
+    while not task.done:
+        run_async(task.tick(char))
+        if char.cooldown > 0:
+            client.expire_cooldown("A")
+            char.set_cooldown_until(None)
+
+    assert char.inventory.get_item_count("sunflower") == 2
+
+    # Next cycle: CLEAR must not send the character back to the bank just
+    # because 2 leftover sunflower are sitting in inventory. Character is
+    # still (correctly) at the bank from the deposit above, so ACQUIRE can
+    # go straight to a withdrawal check with no extra deposit round trip.
+    task = goal.next_task(char)
+    assert isinstance(task, CheckBankStockTask)  # potion stock recheck, deposit reset it
+    run_async(task.tick(char))
+
+    task = goal.next_task(char)
+    assert not isinstance(task, DepositTask)
+    assert isinstance(task, WithdrawMaterialTask)
+    assert task.requested_quantity == 13  # 15 target - 2 leftover already held
+
+
+# ---------------------------------------------------------------------------
+# ACQUIRE vs. a genuinely full inventory (regression: Rolf stuck retrying
+# the same gather forever - the server's actual yield doesn't always match
+# our own free-space math, and ACQUIRE never checked for that)
+# ---------------------------------------------------------------------------
+
+
+def test_acquire_stops_gathering_once_inventory_actually_fills_up():
+    """A 497 from GatherAction mid-ACQUIRE must stop that material's
+    top-up (not retry the exact same gather forever) and let the cycle
+    move on to CRAFT with whatever's already on hand."""
+    client = FakeClient(["A"])
+    Action.configure_client(client)
+    char = _char(client, inventory_max_items=200)
+    goal = _make_craft_goal(quantity=1000)  # sized by capacity - many batches needed
+
+    _resolve(goal, char)
+    run_async(goal.next_task(char).tick(char))  # initial potion bank-stock check (0)
+
+    task = goal.next_task(char)  # ACQUIRE: untried yet -> travel to bank to check stock
+    assert isinstance(task, TravelTask)
+    run_async(task.tick(char))
+
+    task = goal.next_task(char)  # bank is empty -> no-op, marks tried and done
+    assert isinstance(task, WithdrawMaterialTask)
+    run_async(task.tick(char))
+
+    char.position = SUNFLOWER_LOCATION
+    client.fail_next_action_with_497("A")
+    task = goal.next_task(char)
+    assert isinstance(task, GatherTask)
+    run_async(task.tick(char))  # 497 - must not raise
+    assert task.done is True
+    assert char.inventory.get_free_space() == 0
+
+    # ACQUIRE must not retry the same gather now that the server says
+    # there's no room left - it should give up on the target and move on.
+    task = goal.next_task(char)
+    assert not isinstance(task, GatherTask)
+    assert goal._craft_stage == goal._STAGE_CRAFT
+
+    # ...and only 13 more are needed to hit the 15-sunflower cycle target.
+    assert goal._acquire_targets == {"sunflower": 15}
 
 
 # ---------------------------------------------------------------------------

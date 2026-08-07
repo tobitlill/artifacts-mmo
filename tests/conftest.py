@@ -109,8 +109,11 @@ class FakeClient:
             self._maybe_fail(s)
             code, quantity = json[0]["code"], json[0]["quantity"]
             self.bank[code] = self.bank.get(code, 0) - quantity
-            s["inventory"] = [slot for slot in s["inventory"] if slot["code"] != code]
-            s["inventory"].append({"code": code, "quantity": quantity})
+            existing = next((slot for slot in s["inventory"] if slot["code"] == code), None)
+            if existing:
+                existing["quantity"] += quantity
+            else:
+                s["inventory"].append({"code": code, "quantity": quantity})
             return self._resp(name)
 
         if path.endswith("/action/equip"):
@@ -198,6 +201,13 @@ class FakeClient:
         though free space looked sufficient beforehand. The next
         fight/gather POST for this character raises 497 exactly once."""
         self.state[name]["_fail_next_with"] = (497, "The character's inventory is full.")
+
+    def fail_next_action_with_478(self, name):
+        """Simulates a bank stock race: another character (this is a
+        multi-character bot sharing one bank) withdrew the item between our
+        availability check and this withdrawal actually posting. The next
+        withdraw POST for this character raises 478 exactly once."""
+        self.state[name]["_fail_next_with"] = (478, "Missing item or insufficient quantity in this item.")
 
     def expire_cooldown(self, name):
         """Force both the fake server's and (via the real Character object,
