@@ -40,7 +40,7 @@ CHARACTER_GOALS: dict[str, Callable[[], list[Goal]]] = {
     "tib0t": lambda: [
         EndlessFightGoal(
             location=Location(1, -1),
-            monster="sheep",
+            monster="red_slime",
             potion_item_code="small_health_potion",
             potion_slot="utility1",
             potion_min_level=5,
