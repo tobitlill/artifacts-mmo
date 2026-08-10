@@ -39,8 +39,8 @@ load_dotenv()
 CHARACTER_GOALS: dict[str, Callable[[], list[Goal]]] = {
     "tib0t": lambda: [
         EndlessFightGoal(
-            location=Location(1, -1),
-            monster="red_slime",
+            location=Location(0, 2),
+            monster="cow",
             potion_item_code="small_health_potion",
             potion_slot="utility1",
             potion_min_level=5,
@@ -48,6 +48,12 @@ CHARACTER_GOALS: dict[str, Callable[[], list[Goal]]] = {
         )
     ],
     "Hugo": lambda: [
+        GatherResourcesGoal(
+            item_code="small_health_potion",
+            quantity=1000,
+            material_locations={"sunflower": RESOURCE_LOCATIONS["sunflower"]},
+            cycle_batches=30,
+        ),
         EndlessFightGoal(
             location=Location(0, -1),
             monster="chicken",
@@ -62,7 +68,7 @@ CHARACTER_GOALS: dict[str, Callable[[], list[Goal]]] = {
             item_code="small_health_potion",
             quantity=1000,
             material_locations={"sunflower": RESOURCE_LOCATIONS["sunflower"]},
-            cycle_batches=60,
+            cycle_batches=30,
         ),
         GatherResourcesGoal(
             item_code="sunflower",
@@ -94,6 +100,16 @@ CHARACTER_GOALS: dict[str, Callable[[], list[Goal]]] = {
             item_code="copper_ore",
             quantity=2000,
         ),
+        GatherResourcesGoal(
+            item_code="iron_bar",
+            quantity=200,
+            material_locations={"iron_ore": RESOURCE_LOCATIONS["iron_ore"]},
+        ),
+        GatherResourcesGoal(
+            location=RESOURCE_LOCATIONS["iron_ore"],
+            item_code="iron_ore",
+            quantity=2000,
+        ),
         EndlessFightGoal(
             location=MONSTER_LOCATIONS["chicken"],
             monster="chicken",
@@ -104,6 +120,14 @@ CHARACTER_GOALS: dict[str, Callable[[], list[Goal]]] = {
         ),
     ],
     "Rolf": lambda: [
+        GatherResourcesGoal(
+            item_code="spruce_plank",
+            quantity=200,
+            material_locations={"spruce_wood": RESOURCE_LOCATIONS["spruce_wood"]},
+        ),
+        GatherResourcesGoal(
+            location=RESOURCE_LOCATIONS["spruce_wood"], item_code="spruce_wood", quantity=2000
+        ),
         GatherResourcesGoal(
             item_code="ash_plank",
             quantity=200,

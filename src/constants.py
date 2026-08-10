@@ -18,7 +18,9 @@ WORKSHOP_LOCATIONS: dict[str, Location] = {
 RESOURCE_LOCATIONS: dict[str, Location] = {
     "sunflower": Location(2, 2),
     "copper_ore": Location(2, 0),
+    "iron_ore": Location(1, 7),
     "ash_wood": Location(6, 1),
+    "spruce_wood": Location(2, 6),
     "gudgeon": Location(4, 2),
 }
 
