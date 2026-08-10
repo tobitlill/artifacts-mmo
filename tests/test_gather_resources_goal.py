@@ -1,11 +1,12 @@
 from src.action import Action
 from src.character import Character
 from src.constants import BANK_LOCATION
-from src.goals.gather_ressources_goal import GatherResourcesGoal
+from src.goals.gather_resources_goal import GatherResourcesGoal
 from src.location import Location
 from src.tasks.check_bank_stock_task import CheckBankStockTask
 from src.tasks.craft_task import CraftTask
 from src.tasks.deposit_task import DepositTask
+from src.tasks.equip_tool_task import EquipToolTask
 from src.tasks.gather_task import GatherTask
 from src.tasks.resolve_recipe_task import ResolveRecipeTask
 from src.tasks.travel_task import TravelTask
@@ -127,6 +128,68 @@ def test_gather_mode_deposits_when_inventory_gets_low_on_space():
     run_async(goal.next_task(char).tick(char))
     task = goal.next_task(char)
     assert isinstance(task, DepositTask)
+
+
+def test_gather_mode_checks_bank_stock_for_tool_before_traveling():
+    client = FakeClient(["A"])
+    Action.configure_client(client)
+    char = _char(client)
+    client.bank["wooden_axe"] = 5
+    char.position = SUNFLOWER_LOCATION  # already at the gather spot, room to spare
+    goal = GatherResourcesGoal(
+        item_code="sunflower", quantity=1000, location=SUNFLOWER_LOCATION, tool_item_code="wooden_axe"
+    )
+
+    _resolve(goal, char)
+    run_async(goal.next_task(char).tick(char))  # goal's own completion bank-stock check (0)
+
+    task = goal.next_task(char)
+    assert isinstance(task, CheckBankStockTask)  # tool's bank-stock precheck
+    assert task.item_code == "wooden_axe"
+    run_async(task.tick(char))
+
+    task = goal.next_task(char)
+    assert isinstance(task, TravelTask)
+    assert task.target_location == BANK_LOCATION
+
+
+def test_gather_mode_skips_the_bank_trip_for_a_tool_the_bank_does_not_have():
+    client = FakeClient(["A"])
+    Action.configure_client(client)
+    char = _char(client)
+    # client.bank has no wooden_axe at all
+    char.position = SUNFLOWER_LOCATION
+    goal = GatherResourcesGoal(
+        item_code="sunflower", quantity=1000, location=SUNFLOWER_LOCATION, tool_item_code="wooden_axe"
+    )
+
+    _resolve(goal, char)
+    run_async(goal.next_task(char).tick(char))
+
+    task = goal.next_task(char)
+    assert isinstance(task, CheckBankStockTask)
+    run_async(task.tick(char))  # bank has none
+
+    task = goal.next_task(char)
+    assert isinstance(task, GatherTask)
+
+
+def test_gather_mode_equips_tool_once_at_the_bank():
+    client = FakeClient(["A"])
+    Action.configure_client(client)
+    char = _char(client)
+    client.bank["wooden_axe"] = 5
+    char.position = BANK_LOCATION
+    goal = GatherResourcesGoal(
+        item_code="sunflower", quantity=1000, location=SUNFLOWER_LOCATION, tool_item_code="wooden_axe"
+    )
+
+    _resolve(goal, char)
+    run_async(goal.next_task(char).tick(char))
+
+    task = goal.next_task(char)
+    assert isinstance(task, EquipToolTask)
+    assert task.item_code == "wooden_axe"
 
 
 # ---------------------------------------------------------------------------
@@ -295,6 +358,36 @@ def test_falls_back_to_gathering_for_shortfall_after_one_bank_attempt():
     assert task.target_location == SUNFLOWER_LOCATION
 
 
+def test_acquire_checks_for_tool_before_gathering_the_material():
+    """The tool is only needed once actual gathering is about to happen,
+    not for withdrawing a bank stockpile - it must be checked after the
+    bank-withdrawal attempt for the material, not before."""
+    client = FakeClient(["A"])
+    Action.configure_client(client)
+    char = _char(client)
+    client.bank["wooden_axe"] = 5
+    # client.bank has no sunflower - the withdrawal attempt below will no-op
+    goal = _make_craft_goal(cycle_batches=5, tool_item_code="wooden_axe")
+
+    _resolve(goal, char)
+    run_async(goal.next_task(char).tick(char))  # potion bank-stock check (0)
+
+    task = goal.next_task(char)  # ACQUIRE: untried yet -> travel to bank to check stock
+    assert isinstance(task, TravelTask)
+    assert task.target_location == BANK_LOCATION
+    run_async(task.tick(char))
+
+    task = goal.next_task(char)  # bank has no sunflower -> no-op, marks tried
+    assert isinstance(task, WithdrawMaterialTask)
+    run_async(task.tick(char))
+
+    # still at the bank, material withdrawal exhausted - equip the tool
+    # before heading out to gather rather than going out bare-handed.
+    task = goal.next_task(char)
+    assert isinstance(task, EquipToolTask)
+    assert task.item_code == "wooden_axe"
+
+
 def test_acquiring_a_full_cycle_of_materials_does_not_trigger_a_premature_deposit():
     """Regression test for the Udo/Rolf oscillation bug: withdrawing/
     gathering a full cycle's worth of material can leave very little free
@@ -330,7 +423,7 @@ def test_acquiring_a_full_cycle_of_materials_does_not_trigger_a_premature_deposi
     # ...but the very next decision must move on to CRAFT, not loop back
     # to depositing/withdrawing the same material again.
     task = goal.next_task(char)
-    assert goal._craft_stage == goal._STAGE_CRAFT
+    assert goal._craft.stage == goal._STAGE_CRAFT
     assert isinstance(task, CheckBankStockTask)  # the pre-craft recheck, not a deposit
 
 
@@ -374,7 +467,7 @@ def _advance_to_craft_stage(goal, char, materials: dict, client=None):
     if client is not None:
         client.state[char.name]["inventory"] = inventory["inventory"]
         client.state[char.name]["inventory_max_items"] = 50
-    goal._craft_stage = goal._STAGE_CRAFT
+    goal._craft.stage = goal._STAGE_CRAFT
 
 
 def test_rechecks_bank_stock_once_more_before_committing_to_a_craft():
@@ -493,10 +586,10 @@ def test_clear_stage_skips_bank_trip_when_only_leftover_material_remains():
     # must not deposit it, it should move straight to ACQUIRE.
     task = goal.next_task(char)
     assert not isinstance(task, DepositTask)
-    assert goal._craft_stage == goal._STAGE_ACQUIRE
+    assert goal._craft.stage == goal._STAGE_ACQUIRE
 
     # and the 2 already held count directly toward this cycle's target
-    assert goal._acquire_targets == {"sunflower": 15}
+    assert goal._craft.acquire_targets == {"sunflower": 15}
     assert char.inventory.get_item_count("sunflower") == 2  # untouched, not deposited
 
 
@@ -563,7 +656,7 @@ def test_bank_stage_leaves_leftover_material_out_of_the_deposit():
             char.set_cooldown_until(None)
 
     assert char.inventory.get_item_count("sunflower") == 2
-    assert goal._craft_stage == goal._STAGE_BANK
+    assert goal._craft.stage == goal._STAGE_BANK
 
     char.position = BANK_LOCATION
     task = goal.next_task(char)
@@ -670,10 +763,10 @@ def test_acquire_stops_gathering_once_inventory_actually_fills_up():
     # there's no room left - it should give up on the target and move on.
     task = goal.next_task(char)
     assert not isinstance(task, GatherTask)
-    assert goal._craft_stage == goal._STAGE_CRAFT
+    assert goal._craft.stage == goal._STAGE_CRAFT
 
     # ...and only 13 more are needed to hit the 15-sunflower cycle target.
-    assert goal._acquire_targets == {"sunflower": 15}
+    assert goal._craft.acquire_targets == {"sunflower": 15}
 
 
 # ---------------------------------------------------------------------------

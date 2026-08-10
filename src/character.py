@@ -29,6 +29,9 @@ class Character:
         self.data: dict = {}
         self.inventory: Inventory = Inventory(self)
 
+        self._consecutive_tick_failures = 0
+        self._tick_backoff_until: datetime | None = None
+
     async def refresh(self) -> None:
         """Force a full re-sync from the API. Prefer letting actions update
         local state from their own responses; only call this for the
@@ -68,8 +71,29 @@ class Character:
             finished = self.goals.pop(0)
             logger.info(f"Goal {finished.name} finished for {self.name}")
 
-    def get_inventory(self) -> Inventory:
-        return self.inventory
+    def is_backing_off(self) -> bool:
+        """True while skipping ticks after repeated failures (see
+        record_tick_failure) - a permanently broken goal/task (bad
+        item_code, an unhandled status code, ...) must not hammer the
+        same doomed API call every second forever."""
+        if self._tick_backoff_until is None:
+            return False
+        if self._tick_backoff_until <= datetime.now(timezone.utc):
+            self._tick_backoff_until = None
+            return False
+        return True
+
+    def record_tick_success(self) -> None:
+        self._consecutive_tick_failures = 0
+        self._tick_backoff_until = None
+
+    def record_tick_failure(self) -> int:
+        """Grows the backoff delay with each consecutive failure (capped
+        at 60s) and returns it, so the caller can log/report it."""
+        self._consecutive_tick_failures += 1
+        delay = min(2**self._consecutive_tick_failures, 60)
+        self._tick_backoff_until = datetime.now(timezone.utc) + timedelta(seconds=delay)
+        return delay
 
     def set_cooldown_until(self, expiration: datetime | str | None) -> None:
         if expiration is None:

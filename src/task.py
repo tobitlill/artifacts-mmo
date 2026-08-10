@@ -26,11 +26,11 @@ class Task(ABC):
     def is_on_cooldown(self, character: Character) -> bool:
         cooldown = character.cooldown
         if cooldown > 0:
-            logger.info(
+            logger.debug(
                 f"{character.name} is on cooldown for {cooldown} seconds, skipping {self.name}"
             )
             return True
-        logger.info(f"{character.name} is not on cooldown, proceeding with {self.name}")
+        logger.debug(f"{character.name} is not on cooldown, proceeding with {self.name}")
         return False
 
     async def apply_cooldown_error(self, character: Character, e: CharacterInCooldownError) -> None:

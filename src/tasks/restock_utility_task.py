@@ -4,6 +4,7 @@ from src.actions.bank_action import GetBankItemQuantity
 from src.actions.equip_action import EquipAction
 from src.actions.withdraw_action import WithdrawAction
 from src.api_client import ArtifactsAPIError, CharacterInCooldownError
+from src.artifacts_status_codes import INVENTORY_FULL, INSUFFICIENT_QUANTITY, CONTENT_NOT_FOUND
 from src.event_log import EVENT_LOG
 import logging
 
@@ -53,7 +54,7 @@ class RestockUtilityTask(Task):
             # equipped, so it needs inventory room too - never ask for more
             # than actually fits, even if the caller expected the inventory
             # to already be empty by this point.
-            free_space = character.get_inventory().get_free_space()
+            free_space = character.inventory.get_free_space()
             quantity = min(available, self.max_quantity, free_space)
             if quantity <= 0:
                 logger.info(f"No inventory space to withdraw {self.item_code} for {character.name} right now")
@@ -75,13 +76,13 @@ class RestockUtilityTask(Task):
             await self.apply_cooldown_error(character, e)
             return
         except ArtifactsAPIError as e:
-            if e.status_code == 497:
+            if e.status_code == INVENTORY_FULL:
                 logger.warning(f"{character.name}'s inventory is full - can't restock {self.item_code} right now")
                 EVENT_LOG.record(character.name, "inventory full, skipping potion restock for now")
                 character.inventory.mark_full()
                 self.done = True
                 return
-            if e.status_code == 478:
+            if e.status_code == INSUFFICIENT_QUANTITY:
                 # Multiple characters share one bank and tick concurrently -
                 # the availability check above can be stale by the time the
                 # withdraw (or equip, if withdrawal already went through but
@@ -93,6 +94,15 @@ class RestockUtilityTask(Task):
                     f"bank stock changed since the check"
                 )
                 EVENT_LOG.record(character.name, f"bank ran out of {self.item_code} before restock")
+                self.done = True
+                return
+            if e.status_code == CONTENT_NOT_FOUND:
+                # Should be prevented by the caller checking position
+                # before returning this task - but if our local position
+                # is stale for any reason, resync rather than crash.
+                logger.warning(f"{character.name} isn't at the bank after all - resyncing state")
+                EVENT_LOG.record(character.name, "lost track of the bank, resyncing")
+                await character.refresh()
                 self.done = True
                 return
             raise

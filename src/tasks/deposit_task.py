@@ -3,6 +3,7 @@ from src.task import Task
 from src.character import Character
 from src.actions.deposit_action import DepositAction
 from src.api_client import ArtifactsAPIError, CharacterInCooldownError
+from src.artifacts_status_codes import INSUFFICIENT_QUANTITY, CONTENT_NOT_FOUND
 from src.event_log import EVENT_LOG
 import logging
 
@@ -41,13 +42,14 @@ class DepositTask(Task):
             await self.apply_cooldown_error(character, e)
             return
         except ArtifactsAPIError as e:
-            if e.status_code == 478:
+            if e.status_code == INSUFFICIENT_QUANTITY:
                 logger.info(f"{character.name} has no items to deposit")
                 self.done = True
                 return
 
-            if e.status_code == 598:
+            if e.status_code == CONTENT_NOT_FOUND:
                 logger.info(f"{character.name} has no bank access")
+                await character.refresh()
                 self.done = True
                 EVENT_LOG.record(character.name, "deposit failed: no bank access")
                 return
@@ -60,7 +62,7 @@ class DepositTask(Task):
         if not self.all:
             return self.item_code, self.quantity
 
-        inventory: Inventory = character.get_inventory()
+        inventory: Inventory = character.inventory
         for slot in inventory.slots:
             if slot.get("quantity", 0) > 0 and slot.get("code") not in self.exclude:
                 return slot.get("code"), slot.get("quantity")

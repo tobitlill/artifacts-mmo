@@ -5,6 +5,7 @@ from src.goals.endless_fighting_goal import EndlessFightGoal
 from src.location import Location
 from src.tasks.check_bank_stock_task import CheckBankStockTask
 from src.tasks.deposit_task import DepositTask
+from src.tasks.equip_tool_task import EquipToolTask
 from src.tasks.fight_task import FightTask
 from src.tasks.heal_task import HealTask
 from src.tasks.restock_utility_task import RestockUtilityTask
@@ -235,6 +236,82 @@ def test_out_of_potions_leads_to_a_restock_task_once_at_the_bank():
 
     assert isinstance(task, RestockUtilityTask)
     assert task.item_code == "small_health_potion"
+
+
+def test_missing_weapon_checks_bank_stock_then_travels():
+    client = FakeClient(["A"])
+    Action.configure_client(client)
+    char = _char(client, level=8)
+    client.bank["wooden_sword"] = 5
+    char.position = Location(5, 5)  # already at the fight spot, healthy, room to spare
+
+    goal = EndlessFightGoal(monster="chicken", location=Location(5, 5), tool_item_code="wooden_sword")
+    task = goal.next_task(char)
+
+    assert isinstance(task, CheckBankStockTask)
+    run_async(task.tick(char))
+
+    task = goal.next_task(char)
+    assert isinstance(task, TravelTask)
+    assert task.target_location == BANK_LOCATION
+
+
+def test_skips_the_bank_trip_for_a_weapon_the_bank_does_not_have():
+    client = FakeClient(["A"])
+    Action.configure_client(client)
+    char = _char(client, level=8)
+    # client.bank has no wooden_sword at all
+    char.position = Location(5, 5)
+
+    goal = EndlessFightGoal(monster="chicken", location=Location(5, 5), tool_item_code="wooden_sword")
+    task = goal.next_task(char)
+    assert isinstance(task, CheckBankStockTask)
+    run_async(task.tick(char))
+
+    task = goal.next_task(char)
+    assert isinstance(task, FightTask)
+
+
+def test_equips_weapon_once_at_the_bank():
+    client = FakeClient(["A"])
+    Action.configure_client(client)
+    char = _char(client, level=8)
+    client.bank["wooden_sword"] = 5
+    char.position = BANK_LOCATION
+
+    goal = EndlessFightGoal(monster="chicken", location=Location(5, 5), tool_item_code="wooden_sword")
+    task = goal.next_task(char)
+
+    assert isinstance(task, EquipToolTask)
+    assert task.item_code == "wooden_sword"
+
+
+def test_deposit_runs_before_weapon_swap_when_both_are_needed():
+    client = FakeClient(["A"])
+    Action.configure_client(client)
+    char = _char(client, level=8)
+    client.bank["wooden_sword"] = 5
+    char.inventory.slots = [{"code": "chicken_feather", "quantity": 20}]
+    char.inventory.max_items = 20
+    char.position = BANK_LOCATION
+
+    goal = EndlessFightGoal(monster="chicken", location=Location(5, 5), tool_item_code="wooden_sword")
+    task = goal.next_task(char)
+    assert isinstance(task, DepositTask)
+
+
+def test_already_wielding_the_right_weapon_skips_the_swap_entirely():
+    client = FakeClient(["A"])
+    Action.configure_client(client)
+    client.state["A"]["weapon_slot"] = "wooden_sword"
+    client.state["A"]["weapon_slot_quantity"] = 1
+    char = _char(client, level=8)
+    char.position = Location(5, 5)
+
+    goal = EndlessFightGoal(monster="chicken", location=Location(5, 5), tool_item_code="wooden_sword")
+    task = goal.next_task(char)
+
+    assert isinstance(task, FightTask)
 
 
 def test_below_potion_min_level_never_triggers_a_potion_bank_trip():

@@ -11,7 +11,7 @@ from src.game import Game
 from src.character import Character
 from src.goal import Goal
 from src.goals.endless_fighting_goal import EndlessFightGoal
-from src.goals.gather_ressources_goal import GatherResourcesGoal
+from src.goals.gather_resources_goal import GatherResourcesGoal
 from src.location import Location
 from src.logging_config import configure_logging
 from src.constants import RESOURCE_LOCATIONS, MONSTER_LOCATIONS
@@ -36,25 +36,28 @@ load_dotenv()
 # gets its own objects - Goal/Task state is mutable and per-run, so
 # sharing one instance across characters would make their progress
 # interfere with each other.
+DEFAULT_POTION_KWARGS = dict(
+    potion_item_code="small_health_potion",
+    potion_slot="utility1",
+    potion_min_level=5,
+    max_potions=100,
+)
+
 CHARACTER_GOALS: dict[str, Callable[[], list[Goal]]] = {
     "tib0t": lambda: [
         EndlessFightGoal(
             location=Location(1, -1),
             monster="red_slime",
-            potion_item_code="small_health_potion",
-            potion_slot="utility1",
-            potion_min_level=5,
-            max_potions=100,
+            **DEFAULT_POTION_KWARGS,
+            # tool_item_code="TODO_weapon_code", tool_min_level=1,
         )
     ],
     "Hugo": lambda: [
         EndlessFightGoal(
             location=Location(0, -1),
             monster="chicken",
-            potion_item_code="small_health_potion",
-            potion_slot="utility1",
-            potion_min_level=5,
-            max_potions=100,
+            **DEFAULT_POTION_KWARGS,
+            # tool_item_code="TODO_weapon_code", tool_min_level=1,
         )
     ],
     "Juergen": lambda: [
@@ -77,10 +80,8 @@ CHARACTER_GOALS: dict[str, Callable[[], list[Goal]]] = {
         EndlessFightGoal(
             location=MONSTER_LOCATIONS["chicken"],
             monster="chicken",
-            potion_item_code="small_health_potion",
-            potion_slot="utility1",
-            potion_min_level=5,
-            max_potions=100,
+            **DEFAULT_POTION_KWARGS,
+            # tool_item_code="TODO_weapon_code", tool_min_level=1,
         ),
     ],
     "Udo": lambda: [
@@ -88,19 +89,19 @@ CHARACTER_GOALS: dict[str, Callable[[], list[Goal]]] = {
             item_code="copper_bar",
             quantity=200,
             material_locations={"copper_ore": RESOURCE_LOCATIONS["copper_ore"]},
+            # tool_item_code="TODO_pickaxe_code", tool_min_level=1,
         ),
         GatherResourcesGoal(
             location=RESOURCE_LOCATIONS["copper_ore"],
             item_code="copper_ore",
             quantity=2000,
+            # tool_item_code="TODO_pickaxe_code", tool_min_level=1,
         ),
         EndlessFightGoal(
             location=MONSTER_LOCATIONS["chicken"],
             monster="chicken",
-            potion_item_code="small_health_potion",
-            potion_slot="utility1",
-            potion_min_level=5,
-            max_potions=100,
+            **DEFAULT_POTION_KWARGS,
+            # tool_item_code="TODO_weapon_code", tool_min_level=1,
         ),
     ],
     "Rolf": lambda: [
@@ -108,17 +109,19 @@ CHARACTER_GOALS: dict[str, Callable[[], list[Goal]]] = {
             item_code="ash_plank",
             quantity=200,
             material_locations={"ash_wood": RESOURCE_LOCATIONS["ash_wood"]},
+            # tool_item_code="TODO_axe_code", tool_min_level=1,
         ),
         GatherResourcesGoal(
-            location=RESOURCE_LOCATIONS["ash_wood"], item_code="ash_wood", quantity=2000
+            location=RESOURCE_LOCATIONS["ash_wood"],
+            item_code="ash_wood",
+            quantity=2000,
+            # tool_item_code="TODO_axe_code", tool_min_level=1,
         ),
         EndlessFightGoal(
             location=MONSTER_LOCATIONS["chicken"],
             monster="chicken",
-            potion_item_code="small_health_potion",
-            potion_slot="utility1",
-            potion_min_level=5,
-            max_potions=100,
+            **DEFAULT_POTION_KWARGS,
+            # tool_item_code="TODO_weapon_code", tool_min_level=1,
         ),
     ],
     # Any character can instead get a fighting goal (or anything else) -

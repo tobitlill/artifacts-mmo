@@ -3,6 +3,7 @@ from src.character import Character
 from src.actions.bank_action import GetBankItemQuantity
 from src.actions.withdraw_action import WithdrawAction
 from src.api_client import ArtifactsAPIError, CharacterInCooldownError
+from src.artifacts_status_codes import INVENTORY_FULL, INSUFFICIENT_QUANTITY, CONTENT_NOT_FOUND
 from src.event_log import EVENT_LOG
 import logging
 
@@ -29,7 +30,7 @@ class WithdrawMaterialTask(Task):
     async def tick(self, character: Character):
         if self._quantity_to_withdraw is None:
             available = await GetBankItemQuantity(self.item_code).execute(character)
-            free_space = character.get_inventory().get_free_space()
+            free_space = character.inventory.get_free_space()
             quantity = min(available, self.requested_quantity, free_space)
             if quantity <= 0:
                 logger.debug(f"No {self.item_code} available in the bank for {character.name} right now")
@@ -46,13 +47,13 @@ class WithdrawMaterialTask(Task):
             await self.apply_cooldown_error(character, e)
             return
         except ArtifactsAPIError as e:
-            if e.status_code == 497:
+            if e.status_code == INVENTORY_FULL:
                 logger.warning(f"{character.name}'s inventory is full - can't withdraw {self.item_code} right now")
                 EVENT_LOG.record(character.name, "inventory full, skipping material withdrawal for now")
                 character.inventory.mark_full()
                 self.done = True
                 return
-            if e.status_code == 598:
+            if e.status_code == CONTENT_NOT_FOUND:
                 # Should be prevented by the caller checking position
                 # before returning this task - but if our local position
                 # is stale for any reason, resync rather than crash.
@@ -61,7 +62,7 @@ class WithdrawMaterialTask(Task):
                 await character.refresh()
                 self.done = True
                 return
-            if e.status_code == 478:
+            if e.status_code == INSUFFICIENT_QUANTITY:
                 # Multiple characters share one bank and tick concurrently -
                 # the availability check above can be stale by the time this
                 # withdrawal actually posts (someone else got there first).

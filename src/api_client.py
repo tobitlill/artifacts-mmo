@@ -65,6 +65,7 @@ class ArtifactsClient:
         base_url: str | None = None,
         timeout: int = 30,
         max_retries: int = 5,
+        max_concurrent_requests: int = 20,
     ):
         self.base_url = base_url.rstrip("/") if base_url else self.BASE_URL
 
@@ -76,6 +77,14 @@ class ArtifactsClient:
         # bound to the event loop that's actually running requests.
         self._session: aiohttp.ClientSession | None = None
         self._session_lock = asyncio.Lock()
+
+        # Many characters tick concurrently (see Game.tick) and all share
+        # this one client - bound how many requests are actually in flight
+        # at once instead of relying purely on reacting to 429 after the
+        # fact. Held only around the request itself, not around a retry's
+        # backoff sleep, so a rate-limited/erroring request doesn't hog a
+        # slot other characters could be using productively.
+        self._request_semaphore = asyncio.Semaphore(max_concurrent_requests)
 
     async def close(self) -> None:
         if self._session is not None:
@@ -170,75 +179,96 @@ class ArtifactsClient:
         retries = 0
 
         while True:
+            try:
+                async with self._request_semaphore, session.request(method, url, **kwargs) as response:
+                    try:
+                        data = await response.json(content_type=None)
+                    except Exception:
+                        data = await response.text()
 
-            async with session.request(method, url, **kwargs) as response:
-                try:
-                    data = await response.json(content_type=None)
-                except Exception:
-                    data = await response.text()
+                    # ---------------------------------------------
+                    # Success
+                    # ---------------------------------------------
 
-                # ---------------------------------------------
-                # Success
-                # ---------------------------------------------
+                    if response.ok:
+                        return data
 
-                if response.ok:
-                    return data
+                    # ---------------------------------------------
+                    # Rate limit / temporary errors
+                    # ---------------------------------------------
 
-                # ---------------------------------------------
-                # Rate limit / temporary errors
-                # ---------------------------------------------
+                    if response.status in (
+                        429,
+                        500,
+                        502,
+                        503,
+                        504,
+                    ):
 
-                if response.status in (
-                    429,
-                    500,
-                    502,
-                    503,
-                    504,
-                ):
+                        if retries >= self.max_retries:
+                            raise ArtifactsAPIError(
+                                response.status,
+                                "Maximum retries exceeded",
+                                data,
+                            )
 
-                    if retries >= self.max_retries:
-                        raise ArtifactsAPIError(
-                            response.status,
-                            "Maximum retries exceeded",
-                            data,
+                        delay = self._retry_delay(
+                            response,
+                            retries,
                         )
 
-                    delay = self._retry_delay(
-                        response,
-                        retries,
+                        await asyncio.sleep(delay)
+
+                        retries += 1
+                        continue
+
+                    # ---------------------------------------------
+                    # Character in cooldown (code 499)
+                    # ---------------------------------------------
+
+                    if response.status == 499:
+                        cooldown_seconds = self._extract_cooldown_seconds(data)
+                        raise CharacterInCooldownError(
+                            self._character_name_from_path(path),
+                            cooldown_seconds if cooldown_seconds is not None else 0,
+                        )
+
+                    # ---------------------------------------------
+                    # API errors
+                    # ---------------------------------------------
+
+                    message = (
+                        data.get("error", {}).get("message")
+                        if isinstance(data, dict)
+                        else str(data)
                     )
 
-                    await asyncio.sleep(delay)
-
-                    retries += 1
-                    continue
-
-                # ---------------------------------------------
-                # Character in cooldown (code 499)
-                # ---------------------------------------------
-
-                if response.status == 499:
-                    cooldown_seconds = self._extract_cooldown_seconds(data)
-                    raise CharacterInCooldownError(
-                        self._character_name_from_path(path),
-                        cooldown_seconds if cooldown_seconds is not None else 0,
+                    raise ArtifactsAPIError(
+                        response.status,
+                        message,
+                        data,
                     )
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                # Connection refused, DNS failure, dropped connection,
+                # request timeout, ... - the request never got a response
+                # at all, so none of the status-based handling above ever
+                # runs. Route it through the same retry/backoff budget as
+                # a 5xx instead of letting it escape uncaught on the very
+                # first hiccup.
+                if retries >= self.max_retries:
+                    logger.error(
+                        f"{method} {path} failed after {self.max_retries} retries due to a network error"
+                    )
+                    raise
 
-                # ---------------------------------------------
-                # API errors
-                # ---------------------------------------------
-
-                message = (
-                    data.get("error", {}).get("message")
-                    if isinstance(data, dict)
-                    else str(data)
+                delay = min(2**retries, 30)
+                logger.warning(
+                    f"Network error on {method} {path} - retrying in {delay}s "
+                    f"({retries + 1}/{self.max_retries})"
                 )
-
-                raise ArtifactsAPIError(
-                    response.status,
-                    message,
-                    data,
-                )
+                await asyncio.sleep(delay)
+                retries += 1
+                continue
 
     # ---------------------------------------------------------
     # Retry calculation

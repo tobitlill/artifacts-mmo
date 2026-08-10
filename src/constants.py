@@ -2,6 +2,11 @@ from src.location import Location
 
 BANK_LOCATION = Location(4, 1)
 
+# Dashboard display thresholds
+HP_WARN_PERCENT = 60  # below this, the HP cell turns yellow (red below HP_CRITICAL_PERCENT)
+HP_CRITICAL_PERCENT = 30
+COOLDOWN_WARN_SECONDS = 3  # below this, the cooldown cell turns yellow instead of red
+
 # Workshop map tiles, one per crafting skill - confirmed live via
 # GET /maps?content_type=workshop. A recipe's required skill (from
 # Recipe.skill, see src/recipes.py) indexes straight into this.

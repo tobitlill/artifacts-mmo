@@ -3,10 +3,20 @@ from src.character import Character
 from src.actions.travel_action import TravelAction
 from src.location import Location
 from src.api_client import ArtifactsAPIError, CharacterInCooldownError
+from src.artifacts_status_codes import ALREADY_THERE
 from src.event_log import EVENT_LOG
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def ensure_at(character: Character, location: Location) -> Task | None:
+    """A TravelTask if character isn't at location yet, else None - lets a
+    goal write `task = ensure_at(character, X)\n if task: return task`
+    instead of repeating the position-check-then-travel branch by hand."""
+    if character.position != location:
+        return TravelTask(location)
+    return None
 
 
 class TravelTask(Task):
@@ -26,7 +36,7 @@ class TravelTask(Task):
             await self.apply_cooldown_error(character, e)
             return
         except ArtifactsAPIError as e:
-            if e.status_code == 490:
+            if e.status_code == ALREADY_THERE:
                 logger.info(
                     f"{character.name} is already at the target location ({self.target_location.x}, {self.target_location.y})"
                 )

@@ -48,6 +48,54 @@ def test_one_characters_exception_does_not_stop_the_others():
     assert counting_goal.ticks == 1, "the healthy character must still have ticked normally"
 
 
+class FlakyGoal(Goal):
+    """Simulates a permanently broken goal (bad item_code, an unhandled
+    status code, ...) - every next_task() call fails."""
+
+    def __init__(self):
+        super().__init__("Flaky")
+        self.attempts = 0
+
+    def next_task(self, character):
+        self.attempts += 1
+        raise RuntimeError("boom")
+
+
+def test_repeated_failures_trigger_backoff_skipping_ticks():
+    client = FakeClient(["bad"])
+    Action.configure_client(client)
+    bad = Character("bad")
+    goal = FlakyGoal()
+    bad.goals.append(goal)
+    game = Game(api_client=client, characters=[bad])
+    run_async(game.start())
+
+    run_async(game._tick_character_safe(bad))
+    assert goal.attempts == 1
+    assert bad.is_backing_off() is True
+
+    # Backed off now - must skip actually ticking again, not retry
+    # the same doomed goal every call.
+    run_async(game._tick_character_safe(bad))
+    assert goal.attempts == 1
+
+
+def test_backoff_delay_grows_with_consecutive_failures():
+    char = Character("A")
+    assert char.record_tick_failure() == 2
+    assert char.record_tick_failure() == 4
+    assert char.record_tick_failure() == 8
+
+
+def test_backoff_clears_after_a_successful_tick():
+    char = Character("A")
+    char.record_tick_failure()
+    assert char.is_backing_off() is True
+
+    char.record_tick_success()
+    assert char.is_backing_off() is False
+
+
 def test_game_start_syncs_all_characters_concurrently():
     client = FakeClient(["A", "B", "C"])
     Action.configure_client(client)

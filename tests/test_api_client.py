@@ -1,3 +1,4 @@
+import aiohttp
 import pytest
 
 from src.api_client import ArtifactsAPIError, ArtifactsClient, CharacterInCooldownError
@@ -26,6 +27,21 @@ class FakeAiohttpResponse:
 
     async def __aenter__(self):
         return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class FakeAiohttpNetworkError:
+    """Stands in for a `session.request(...)` call that fails before ever
+    getting a response - a connection/DNS/timeout error, raised on
+    entering the `async with` block, same as the real aiohttp client."""
+
+    def __init__(self, exc: Exception):
+        self._exc = exc
+
+    async def __aenter__(self):
+        raise self._exc
 
     async def __aexit__(self, *exc):
         return False
@@ -114,6 +130,41 @@ def test_max_retries_exceeded_raises(monkeypatch):
     with pytest.raises(ArtifactsAPIError) as exc_info:
         run_async(client.get("/my/characters"))
     assert exc_info.value.status_code == 500
+
+
+def test_network_error_retries_then_succeeds(monkeypatch):
+    """A connection/DNS/timeout failure never reaches response-status
+    handling - it must still be retried like a 5xx, not escape uncaught."""
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr("src.api_client.asyncio.sleep", fake_sleep)
+
+    client = _client_with_responses(
+        [
+            FakeAiohttpNetworkError(aiohttp.ClientConnectionError("connection refused")),
+            FakeAiohttpResponse(200, json_data={"data": {"ok": True}}),
+        ]
+    )
+    result = run_async(client.get("/my/characters"))
+    assert result == {"data": {"ok": True}}
+    assert len(sleeps) == 1
+
+
+def test_network_error_exceeds_retries_reraises(monkeypatch):
+    async def fake_sleep(seconds):
+        return None
+
+    monkeypatch.setattr("src.api_client.asyncio.sleep", fake_sleep)
+
+    client = _client_with_responses(
+        [FakeAiohttpNetworkError(aiohttp.ClientConnectionError("connection refused")) for _ in range(3)],
+        max_retries=2,
+    )
+    with pytest.raises(aiohttp.ClientConnectionError):
+        run_async(client.get("/my/characters"))
 
 
 def test_character_name_extracted_from_path():

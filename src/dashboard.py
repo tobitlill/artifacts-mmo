@@ -6,6 +6,7 @@ from rich.console import Group
 from rich.panel import Panel
 from rich.table import Table
 
+from src.constants import COOLDOWN_WARN_SECONDS, HP_CRITICAL_PERCENT, HP_WARN_PERCENT
 from src.event_log import EVENT_LOG
 
 if TYPE_CHECKING:
@@ -15,13 +16,13 @@ if TYPE_CHECKING:
 def _cooldown_cell(seconds: int) -> str:
     if seconds <= 0:
         return "[green]ready[/]"
-    style = "yellow" if seconds <= 3 else "red"
+    style = "yellow" if seconds <= COOLDOWN_WARN_SECONDS else "red"
     return f"[{style}]{seconds}s[/]"
 
 
 def _hp_cell(character: Character) -> str:
     percent = character.hp_percent
-    style = "green" if percent >= 60 else "yellow" if percent >= 30 else "red"
+    style = "green" if percent >= HP_WARN_PERCENT else "yellow" if percent >= HP_CRITICAL_PERCENT else "red"
     return f"[{style}]{character.hp}/{character.max_hp} ({percent:.0f}%)[/]"
 
 

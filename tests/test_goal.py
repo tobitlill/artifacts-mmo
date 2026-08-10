@@ -2,7 +2,7 @@ from src.action import Action
 from src.character import Character
 from src.goal import Goal
 from src.goals.endless_fighting_goal import EndlessFightGoal
-from src.goals.gather_ressources_goal import GatherResourcesGoal
+from src.goals.gather_resources_goal import GatherResourcesGoal
 from src.location import Location
 
 from conftest import FakeClient, run_async

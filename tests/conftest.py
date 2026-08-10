@@ -125,6 +125,21 @@ class FakeClient:
             s[f"{slot}_slot_quantity"] = quantity
             return self._resp(name)
 
+        if path.endswith("/action/unequip"):
+            self._maybe_fail(s)
+            item = json[0]
+            slot, quantity = item["slot"], item.get("quantity", 1)
+            code = s.get(f"{slot}_slot")
+            if code:
+                existing = next((i for i in s["inventory"] if i["code"] == code), None)
+                if existing:
+                    existing["quantity"] += quantity
+                else:
+                    s["inventory"].append({"code": code, "quantity": quantity})
+            s[f"{slot}_slot"] = ""
+            s[f"{slot}_slot_quantity"] = 0
+            return self._resp(name)
+
         if path.endswith("/action/fight"):
             self._maybe_fail(s)
             return self._resp(name)

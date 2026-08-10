@@ -45,11 +45,20 @@ class Game:
     async def _tick_character_safe(self, character: Character) -> None:
         """A bug or an unexpected API error for one character must never
         take the whole process down with it - isolate each character's
-        tick so the others keep running."""
+        tick so the others keep running.
+
+        A persistent failure (bad item_code, an unhandled status code,
+        ...) would otherwise retry the exact same doomed call every
+        second forever - back off with growing delay instead."""
+        if character.is_backing_off():
+            return
+
         try:
             await character.tick()
+            character.record_tick_success()
         except Exception as e:
+            delay = character.record_tick_failure()
             logger.exception(
-                f"Unhandled error while ticking {character.name}, skipping this tick"
+                f"Unhandled error while ticking {character.name}, backing off {delay}s"
             )
-            EVENT_LOG.record(character.name, f"ERROR: {e}")
+            EVENT_LOG.record(character.name, f"ERROR: {e} (backing off {delay}s)")

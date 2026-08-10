@@ -10,6 +10,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class CharacterNotFoundError(Exception):
+    def __init__(self, character_name: str):
+        self.character_name = character_name
+        super().__init__(f"Character {character_name} not found")
+
+
 class GetCharacter(Action):
     def __init__(self):
         self.name = "GetCharacterAction"
@@ -21,4 +27,4 @@ class GetCharacter(Action):
         for c in characters["data"]:
             if c["name"] == character.name:
                 return c
-        raise Exception(f"Character {character.name} not found")
+        raise CharacterNotFoundError(character.name)

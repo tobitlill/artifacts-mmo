@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import logging
 
 from src.goal import Goal
@@ -13,12 +14,37 @@ from src.tasks.craft_task import CraftTask
 from src.tasks.deposit_task import DepositTask
 from src.tasks.gather_task import GatherTask
 from src.tasks.resolve_recipe_task import ResolveRecipeTask
-from src.tasks.travel_task import TravelTask
+from src.tasks.travel_task import ensure_at
 from src.tasks.withdraw_material_task import WithdrawMaterialTask
+from src.goals.bank_errand import next_bank_task
+from src.goals.deposit_errand import DepositErrand
+from src.goals.tool_equip_helper import ToolEquipHelper
 
 logger = logging.getLogger(__name__)
 
 _UNRESOLVED = object()  # sentinel: "haven't looked up the recipe yet"
+
+_STAGE_CLEAR = "clear"
+_STAGE_ACQUIRE = "acquire"
+_STAGE_CRAFT = "craft"
+_STAGE_BANK = "bank"
+
+
+@dataclass
+class _CraftCycle:
+    """One craft cycle's mutable state (CLEAR -> ACQUIRE -> CRAFT -> BANK) -
+    grouped so a fresh cycle resets in one call instead of touching three
+    separately-named flags by hand."""
+
+    stage: str = _STAGE_CLEAR
+    acquire_targets: dict[str, int] | None = None
+    tried_bank_withdrawal: set[str] = field(default_factory=set)
+    rechecked_before_craft: bool = False
+
+    def start_acquiring(self) -> None:
+        self.stage = _STAGE_ACQUIRE
+        self.acquire_targets = None
+        self.tried_bank_withdrawal = set()
 
 
 class GatherResourcesGoal(Goal):
@@ -89,10 +115,10 @@ class GatherResourcesGoal(Goal):
     MIN_FREE_SPACE = 5
     RESERVED_SPACE_FOR_OUTPUT = 5
 
-    _STAGE_CLEAR = "clear"
-    _STAGE_ACQUIRE = "acquire"
-    _STAGE_CRAFT = "craft"
-    _STAGE_BANK = "bank"
+    _STAGE_CLEAR = _STAGE_CLEAR
+    _STAGE_ACQUIRE = _STAGE_ACQUIRE
+    _STAGE_CRAFT = _STAGE_CRAFT
+    _STAGE_BANK = _STAGE_BANK
 
     def __init__(
         self,
@@ -102,6 +128,9 @@ class GatherResourcesGoal(Goal):
         material_locations: dict[str, Location] | None = None,
         craft_location: Location | None = None,
         cycle_batches: int | None = None,
+        tool_item_code: str | None = None,
+        tool_slot: str = "weapon",
+        tool_min_level: int = 1,
     ):
         super().__init__(f"Gather {quantity} {item_code}")
         self.item_code = item_code
@@ -111,14 +140,15 @@ class GatherResourcesGoal(Goal):
         self.craft_location = craft_location
         self.cycle_batches = cycle_batches  # optional cap on batches/cycle; None = as many as fit/needed
 
+        self._tool = ToolEquipHelper(tool_item_code, tool_slot, tool_min_level) if tool_item_code else None
+        self._deposit = DepositErrand(self.MIN_FREE_SPACE)
+        self._gather_errands = [self._deposit, self._tool] if self._tool else [self._deposit]
+
         self.recipe: Recipe | None = _UNRESOLVED
         self._bank_stock: int | None = None
-        self._rechecked_before_craft = False
-        self._tried_bank_withdrawal: set[str] = set()
         self._gave_up = False
 
-        self._craft_stage = self._STAGE_CLEAR
-        self._acquire_targets: dict[str, int] | None = None
+        self._craft = _CraftCycle()
 
     def next_task(self, character: Character):
         if self._gave_up:
@@ -140,7 +170,7 @@ class GatherResourcesGoal(Goal):
         if self._bank_stock is None:
             return CheckBankStockTask(self.item_code, self._set_bank_stock)
 
-        inventory = character.get_inventory()
+        inventory = character.inventory
         total_owned = inventory.get_item_count(self.item_code) + self._bank_stock
         if total_owned >= self.quantity:
             logger.info(
@@ -189,32 +219,31 @@ class GatherResourcesGoal(Goal):
         return True
 
     def _next_gather_task(self, character: Character, inventory: Inventory):
-        if inventory.get_free_space() < self.MIN_FREE_SPACE:
-            if character.position != BANK_LOCATION:
-                logger.info(f"Inventory is full for {character.name}, traveling to bank")
-                return TravelTask(BANK_LOCATION)
-            logger.info(f"Depositing items at bank for {character.name}")
-            self._bank_stock = None  # stock is about to change - recheck next cycle
-            return DepositTask(all=True)
+        bank_task = next_bank_task(character, self._gather_errands)
+        if bank_task is not None:
+            if isinstance(bank_task, DepositTask):
+                self._bank_stock = None  # stock is about to change - recheck next cycle
+            return bank_task
 
-        if character.position != self.location:
+        travel = ensure_at(character, self.location)
+        if travel is not None:
             logger.info(f"Traveling to location ({self.location.x}, {self.location.y}) for {character.name}")
-            return TravelTask(self.location)
+            return travel
 
         logger.info(f"{character.name} gathers {self.item_code} at location ({self.location.x}, {self.location.y})")
         return GatherTask()
 
     def _next_craft_task(self, character: Character, inventory: Inventory):
-        if self._craft_stage == self._STAGE_CLEAR:
+        if self._craft.stage == self._STAGE_CLEAR:
             return self._do_clear(character, inventory)
-        if self._craft_stage == self._STAGE_ACQUIRE:
+        if self._craft.stage == self._STAGE_ACQUIRE:
             task = self._do_acquire(character, inventory)
             if task is not None:
                 return task
             # every material is at its target - move on to crafting
-            self._craft_stage = self._STAGE_CRAFT
-            self._rechecked_before_craft = False
-        if self._craft_stage == self._STAGE_CRAFT:
+            self._craft.stage = self._STAGE_CRAFT
+            self._craft.rechecked_before_craft = False
+        if self._craft.stage == self._STAGE_CRAFT:
             return self._do_craft(character, inventory)
         return self._do_bank(character)
 
@@ -226,16 +255,15 @@ class GatherResourcesGoal(Goal):
         bouncing through the bank for no reason. If there's nothing but
         leftover material to deal with, skip the bank trip entirely."""
         if self._has_depositable_items(inventory):
-            if character.position != BANK_LOCATION:
+            travel = ensure_at(character, BANK_LOCATION)
+            if travel is not None:
                 logger.info(f"Heading to bank to start a clean cycle for {character.name}")
-                return TravelTask(BANK_LOCATION)
+                return travel
             logger.info(f"Depositing at bank for {character.name}")
             self._bank_stock = None
             return DepositTask(all=True, exclude=set(self.material_locations))
 
-        self._craft_stage = self._STAGE_ACQUIRE
-        self._acquire_targets = None
-        self._tried_bank_withdrawal.clear()
+        self._craft.start_acquiring()
         return self._do_acquire(character, inventory)
 
     def _has_depositable_items(self, inventory: Inventory) -> bool:
@@ -251,12 +279,12 @@ class GatherResourcesGoal(Goal):
         has filled up before getting there - the server's actual gather
         yield doesn't always match our own free-space math exactly, so
         trust its rejection over retrying the same doomed gather forever)."""
-        if self._acquire_targets is None:
-            self._acquire_targets = self._compute_acquire_targets(character, inventory)
+        if self._craft.acquire_targets is None:
+            self._craft.acquire_targets = self._compute_acquire_targets(character, inventory)
 
         for material_code, location in self.material_locations.items():
             have = inventory.get_item_count(material_code)
-            target = self._acquire_targets.get(material_code, 0)
+            target = self._craft.acquire_targets.get(material_code, 0)
             if have >= target:
                 continue
 
@@ -267,49 +295,59 @@ class GatherResourcesGoal(Goal):
                 )
                 break
 
-            if material_code not in self._tried_bank_withdrawal:
-                if character.position != BANK_LOCATION:
+            if material_code not in self._craft.tried_bank_withdrawal:
+                travel = ensure_at(character, BANK_LOCATION)
+                if travel is not None:
                     logger.info(f"Heading to bank to check for {material_code} for {character.name}")
-                    return TravelTask(BANK_LOCATION)
-                self._tried_bank_withdrawal.add(material_code)
+                    return travel
+                self._craft.tried_bank_withdrawal.add(material_code)
                 return WithdrawMaterialTask(material_code, target - have)
 
-            if character.position != location:
+            if self._tool is not None:
+                tool_task = next_bank_task(character, [self._tool])
+                if tool_task is not None:
+                    return tool_task
+                # not needed, or the bank has none - gather without it
+
+            travel = ensure_at(character, location)
+            if travel is not None:
                 logger.info(f"Gathering {material_code} for {character.name}")
-                return TravelTask(location)
+                return travel
             return GatherTask()
 
         return None
 
     def _do_craft(self, character: Character, inventory: Inventory):
-        if not self._rechecked_before_craft:
+        if not self._craft.rechecked_before_craft:
             # One more fresh look before committing - stock may already
             # have hit the target from someone else's deposit while
             # materials were being gathered.
-            self._rechecked_before_craft = True
+            self._craft.rechecked_before_craft = True
             self._bank_stock = None
             return CheckBankStockTask(self.item_code, self._set_bank_stock)
 
         batches = self._craftable_batches(inventory)
         if batches > 0:
-            if character.position != self.craft_location:
-                return TravelTask(self.craft_location)
-            self._craft_stage = self._STAGE_BANK
+            travel = ensure_at(character, self.craft_location)
+            if travel is not None:
+                return travel
+            self._craft.stage = self._STAGE_BANK
             return CraftTask(self.item_code, batches)
 
         # Nothing craftable (shouldn't normally happen given ACQUIRE just
         # topped materials up) - bank whatever's here rather than getting
         # stuck, and start a fresh cycle.
-        self._craft_stage = self._STAGE_BANK
+        self._craft.stage = self._STAGE_BANK
         return self._do_bank(character)
 
     def _do_bank(self, character: Character):
-        if character.position != BANK_LOCATION:
+        travel = ensure_at(character, BANK_LOCATION)
+        if travel is not None:
             logger.info(f"Heading to bank to deposit the crafted result for {character.name}")
-            return TravelTask(BANK_LOCATION)
+            return travel
         logger.info(f"Depositing at bank for {character.name}")
         self._bank_stock = None
-        self._craft_stage = self._STAGE_CLEAR
+        self._craft.stage = self._STAGE_CLEAR
         return DepositTask(all=True, exclude=set(self.material_locations))
 
     def _compute_acquire_targets(self, character: Character, inventory: Inventory) -> dict[str, int]:
@@ -347,7 +385,7 @@ class GatherResourcesGoal(Goal):
     def progress_text(self, character: Character) -> str | None:
         if self.recipe is _UNRESOLVED:
             return None
-        inventory_count = character.get_inventory().get_item_count(self.item_code)
+        inventory_count = character.inventory.get_item_count(self.item_code)
         if self._bank_stock is None:
             return f"{inventory_count}+?/{self.quantity} {self.item_code}"
         return f"{inventory_count + self._bank_stock}/{self.quantity} {self.item_code}"
